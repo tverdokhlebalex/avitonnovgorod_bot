@@ -1,0 +1,98 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: questbot
+      POSTGRES_USER: questbot
+      POSTGRES_PASSWORD: questbot
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U questbot -d questbot -h localhost || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+    working_dir: /code/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    # .env можно оставить для прочих секретов; строки ниже перекроют конфликтующие переменные
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://questbot:questbot@db:5432/questbot
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: questbot
+      DB_USER: questbot
+      DB_PASSWORD: questbot
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/code
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  bot:
+    build:
+      context: .
+    working_dir: /code
+    command: python /code/bot/bot.py
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://questbot:questbot@db:5432/questbot
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: questbot
+      DB_USER: questbot
+      DB_PASSWORD: questbot
+    depends_on:
+      app:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/code
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://app:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+volumes:
+  db_data: {}

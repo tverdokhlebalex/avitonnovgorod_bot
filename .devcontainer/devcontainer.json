@@ -1,0 +1,26 @@
+{
+  "name": "questbot-mvp",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "bot",
+  "workspaceFolder": "/code",
+  "runServices": ["db", "redis", "app", "bot"],
+  "shutdownAction": "stopCompose",
+  "overrideCommand": true,
+  "remoteUser": "root",
+  "containerEnv": { "PYTHONPATH": "/code" },
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "python.analysis.extraPaths": ["/code", "/code/app", "/code/bot"],
+        "python.analysis.typeCheckingMode": "basic",
+        "python.analysis.diagnosticSeverityOverrides": {
+          "reportMissingImports": "none",
+          "reportMissingModuleSource": "none"
+        }
+      },
+      "extensions": ["ms-python.python", "ms-azuretools.vscode-docker"]
+    }
+  },
+  "postCreateCommand": "pip install -r /code/requirements.txt"
+}

@@ -1,0 +1,19 @@
+.env
+.env.* 
+/data/
+**/__pycache__/
+**/*.pyc
+*.log
+/.venv/
+/venv/
+node_modules/
+.DS_Store
+# Docker
+*.local.yml
+# Build
+build/
+dist/
+.eggs/
+*.egg-info/
+# proofs
+code/data/proofs/
