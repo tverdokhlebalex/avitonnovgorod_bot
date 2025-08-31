@@ -15,6 +15,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # ---- APT: переключаем источники на зеркала и ставим curl ----------------
 # Заменяем список источников на свои, чтобы apt не упирался в недоступные зеркала
 RUN set -eux; \
+    # убираем все альтернативные источники (ключевой файл debian.sources!)
+    rm -f /etc/apt/sources.list.d/* /etc/apt/sources.list.d/debian.sources || true; \
+    # полностью переписываем sources.list под зеркало Яндекса
     printf '%s\n' \
       'deb http://mirror.yandex.ru/debian bookworm main contrib non-free non-free-firmware' \
       'deb http://mirror.yandex.ru/debian bookworm-updates main contrib non-free non-free-firmware' \
