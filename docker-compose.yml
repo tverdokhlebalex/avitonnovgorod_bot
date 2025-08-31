@@ -34,9 +34,11 @@ services:
   app:
     build:
       context: .
+      network: host
+      args:
+        PIP_INDEX_URL: https://mirror.yandex.ru/mirrors/pypi/simple
     working_dir: /code/app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
-    # .env можно оставить для прочих секретов; строки ниже перекроют конфликтующие переменные
     env_file:
       - .env
     environment:
@@ -57,15 +59,24 @@ services:
       - .:/code
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)",
+        ]
       interval: 10s
       timeout: 5s
-      retries: 10
-      start_period: 15s
+      retries: 12
+      start_period: 20s
 
   bot:
     build:
       context: .
+      network: host
+      args:
+        PIP_INDEX_URL: https://mirror.yandex.ru/mirrors/pypi/simple
     working_dir: /code
     command: python /code/bot/bot.py
     env_file:
@@ -88,7 +99,13 @@ services:
       - .:/code
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://app:8000/health"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://app:8000/health', timeout=2)",
+        ]
       interval: 15s
       timeout: 5s
       retries: 10
