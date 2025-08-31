@@ -21,7 +21,8 @@ RUN set -eux; \
       'deb http://mirror.yandex.ru/debian bookworm-backports main contrib non-free non-free-firmware' \
       'deb http://mirror.yandex.ru/debian-security bookworm-security main contrib non-free' \
       > /etc/apt/sources.list; \
-    apt-get update -y; \
+    # делаем апдейт с таймаутами/ретраями
+    apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update -y; \
     apt-get install -y --no-install-recommends curl ca-certificates; \
     rm -rf /var/lib/apt/lists/*
 
