@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   db:
     image: postgres:15
@@ -34,20 +32,22 @@ services:
   app:
     build:
       context: .
-      network: host
       args:
+        # Dockerfile уже содержит дефолтное зеркало pip; аргументом можно переопределить при желании
         PIP_INDEX_URL: https://mirror.yandex.ru/mirrors/pypi/simple
     working_dir: /code/app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     env_file:
       - .env
     environment:
+      # Явно пробрасываем строку подключения — сервисы в одной сети, используем имя контейнера db
       DATABASE_URL: postgresql+psycopg://questbot:questbot@db:5432/questbot
       DB_HOST: db
       DB_PORT: "5432"
       DB_NAME: questbot
       DB_USER: questbot
       DB_PASSWORD: questbot
+      PROOFS_DIR: /code/data/proofs
     depends_on:
       db:
         condition: service_healthy
@@ -56,9 +56,13 @@ services:
     ports:
       - "8000:8000"
     volumes:
+      # код монтируем с хоста для быстрых обновлений через `git pull`
       - .:/code
+      # фото — в отдельный том (переживёт пересборки)
+      - proofs_data:/code/data/proofs
     restart: unless-stopped
     healthcheck:
+      # без curl: используем встроенный python для GET /health
       test:
         [
           "CMD",
@@ -74,7 +78,6 @@ services:
   bot:
     build:
       context: .
-      network: host
       args:
         PIP_INDEX_URL: https://mirror.yandex.ru/mirrors/pypi/simple
     working_dir: /code
@@ -113,3 +116,4 @@ services:
 
 volumes:
   db_data: {}
+  proofs_data: {}
