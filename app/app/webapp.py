@@ -2,7 +2,7 @@ import os
 import hmac
 import json
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 from urllib.parse import parse_qsl, unquote_plus
 
@@ -25,14 +25,23 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
 
 # --- Telegram WebApp initData verification ---------------------------------
+# Docs: https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
 
 def _calc_telegram_hash(data_check_string: str) -> str:
-    secret_key = hashlib.sha256(BOT_TOKEN.encode("utf-8")).digest()
+    # IMPORTANT: secret key is SHA256("WebAppData" + bot_token)
+    secret_key = hashlib.sha256(b"WebAppData" + BOT_TOKEN.encode("utf-8")).digest()
     return hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def _verify_init_data(init_data: str) -> Dict[str, Any]:
-    """Validate Telegram initData and return parsed dict (with 'user')."""
+    """
+    Validate Telegram initData and return parsed dict (with 'user').
+
+    init_data comes in as a query-string-like blob. We:
+      1) parse it to a dict
+      2) build the check_string in alpha order (k=v, '\n'-joined)
+      3) compare HMAC with the expected secret
+    """
     if not BOT_TOKEN:
         raise HTTPException(500, "BOT_TOKEN is not configured on server")
 
@@ -41,14 +50,21 @@ def _verify_init_data(init_data: str) -> Dict[str, Any]:
     if not provided_hash:
         raise HTTPException(401, "Missing hash")
 
+    # Build data_check_string
     pairs = [f"{k}={parsed[k]}" for k in sorted(parsed.keys())]
     dcs = "\n".join(pairs)
     good_hash = _calc_telegram_hash(dcs)
     if not hmac.compare_digest(good_hash, provided_hash):
         raise HTTPException(401, "Bad initData signature")
 
+    # 'user' field is a JSON string; parse it robustly
     user_raw = parsed.get("user")
-    user = json.loads(unquote_plus(user_raw)) if user_raw else None
+    user = None
+    if user_raw:
+        try:
+            user = json.loads(user_raw)
+        except Exception:
+            user = json.loads(unquote_plus(user_raw))
     if not user or "id" not in user:
         raise HTTPException(401, "No user in initData")
 
@@ -59,16 +75,23 @@ def _verify_init_data(init_data: str) -> Dict[str, Any]:
 # --- DB helpers ------------------------------------------------------------
 
 def _tasks_total(db: Session) -> int:
-    return db.query(models.Task).filter(models.Task.is_active == True).count()  # noqa: E712
+    return (
+        db.query(func.count(models.Task.id))
+        .filter(models.Task.is_active == True)  # noqa: E712
+        .scalar()
+    ) or 0
 
 
 def _solved_count(db: Session, team_id: int) -> int:
     return (
-        db.query(models.Task)
-        .join(models.TeamTaskProgress, models.TeamTaskProgress.task_id == models.Task.id)
-        .filter(models.TeamTaskProgress.team_id == team_id, models.TeamTaskProgress.status == "APPROVED")
-        .count()
-    )
+        db.query(func.count(models.TeamTaskProgress.id))
+        .join(models.Task, models.Task.id == models.TeamTaskProgress.task_id)
+        .filter(
+            models.TeamTaskProgress.team_id == team_id,
+            models.TeamTaskProgress.status == "APPROVED",
+        )
+        .scalar()
+    ) or 0
 
 
 def _current_task(db: Session, team_id: int) -> Optional[models.Task]:
@@ -110,7 +133,7 @@ def _leaderboard(db: Session) -> List[Dict[str, Any]]:
       2) then running/idle teams by solved desc
       3) then by team_id asc
     """
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     total = _tasks_total(db)
     teams = db.query(models.Team).order_by(models.Team.id.asc()).all()
 
@@ -137,14 +160,13 @@ def _leaderboard(db: Session) -> List[Dict[str, Any]]:
             try:
                 duration_sec = int((end_time - started_at).total_seconds())
             except Exception:
-                # If tz-aware vs naive clash somehow slips in, fallback to string compare not needed — just skip duration
                 duration_sec = None
 
         result.append({
             "team_id": t.id,
             "team_name": t.name,
-            "solved": solved,
-            "total": total,
+            "solved": int(solved),
+            "total": int(total),
             "started_at": started_at.isoformat() if started_at else None,
             "finished_at": finished_at.isoformat() if finished_at else None,
             "duration_sec": duration_sec,
@@ -480,14 +502,14 @@ def webapp_summary(init_data: str = Query(...), db: Session = Depends(get_db)):
     )
 
     out: Dict[str, Any] = {
-        "is_captain": (member.role == "CAPTAIN"),
+        "is_captain": ((member.role or "").upper() == "CAPTAIN"),
         "team": {
             "team_id": team.id,
             "team_name": team.name,
             "started_at": team.started_at.isoformat() if team.started_at else None,
             "finished_at": finished_at.isoformat() if finished_at else None,
-            "solved": solved,
-            "total": total,
+            "solved": int(solved),
+            "total": int(total),
         },
         "current_task": None,
         "first_task_map": _yandex_url(first_task) if first_task else None,
@@ -511,7 +533,7 @@ def webapp_start(body: Dict[str, Any] = Body(...), db: Session = Depends(get_db)
     tg_id = str(data["user"]["id"])
     team, member, _user = _team_for_tg(db, tg_id)
 
-    if member.role != "CAPTAIN":
+    if (member.role or "").upper() != "CAPTAIN":
         raise HTTPException(403, "Only captain can start")
 
     if team.started_at:
@@ -523,7 +545,7 @@ def webapp_start(body: Dict[str, Any] = Body(...), db: Session = Depends(get_db)
         )
         return JSONResponse({"ok": True, "already": True, "map_url": _yandex_url(task) if task else None})
 
-    team.started_at = datetime.utcnow()
+    team.started_at = datetime.now(timezone.utc)
     db.commit()
 
     first = _current_task(db, team.id) or (

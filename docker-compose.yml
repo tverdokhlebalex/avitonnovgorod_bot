@@ -48,6 +48,7 @@ services:
       DB_USER: questbot
       DB_PASSWORD: questbot
       PROOFS_DIR: /code/data/proofs
+      BOT_TOKEN: ${BOT_TOKEN}
     depends_on:
       db:
         condition: service_healthy
