@@ -9,18 +9,21 @@ from typing import Dict, Tuple, Optional, List, Any
 
 import aiohttp
 from aiogram import Bot, Dispatcher, Router, F
-from aiogram.types import (
-    Message, ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
-)
 from aiogram.enums import ContentType
+from aiogram.exceptions import TelegramForbiddenError
 from aiogram.filters import CommandStart, StateFilter
-from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import (
+    Message,
+    ReplyKeyboardMarkup, KeyboardButton,
+    InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo,
+)
+from aiogram.types.error_event import ErrorEvent
 
 # --------------------
-# Конфиг
+# Конфиг и логирование
 # --------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
@@ -33,23 +36,22 @@ _api_base = os.getenv("API_BASE") or os.getenv("API_URL", "http://app:8000")
 API_BASE = _api_base.rstrip("/")
 APP_SECRET = os.getenv("APP_SECRET", "change-me-please")
 
-# Показывать ли строгий «белый список» (CSV)
+# Строгий белый список
 STRICT_WHITELIST = os.getenv("STRICT_WHITELIST", "true").lower() in ("1", "true", "yes", "y")
 
-# Размер команды (показываем статус заполненности; сервер тоже использует TEAM_SIZE)
+# Размер команды
 TEAM_SIZE = int(os.getenv("TEAM_SIZE", "7"))
 
-# Мини-приложение: базовый URL (HTTPS для Telegram; локально можно http + ?dev_tg=…)
+# WebApp URL (для Telegram нужен HTTPS; локально http + ?dev_tg=…)
 WEBAPP_URL = (os.getenv("WEBAPP_URL") or f"{API_BASE}/webapp").strip()
 
 # CSV с участниками
 PARTICIPANTS_CSV = os.getenv("PARTICIPANTS_CSV", "/code/data/participants.csv")
 PARTICIPANTS_CSV_FALLBACK = "/code/data/participants_template.csv"
 
-# HTTP
+# HTTP клиент
 CLIENT_TIMEOUT = aiohttp.ClientTimeout(total=15, connect=5, sock_connect=5, sock_read=10)
 HTTP: Optional[aiohttp.ClientSession] = None
-
 
 # --------------------
 # Утилиты
@@ -67,7 +69,7 @@ def norm_phone(s: str) -> str:
 
 def parse_name_simple(text: str) -> Tuple[str, Optional[str]]:
     """
-    Берём первое слово как имя, остальное — как фамилию (опционально).
+    Берём первое слово как имя, остальное — фамилия (опционально).
     """
     t = " ".join((text or "").replace(",", " ").replace(".", " ").split()).strip()
     if not t:
@@ -88,7 +90,7 @@ def headers_json() -> dict:
 
 def build_webapp_url(tg_id: int | str) -> str:
     """
-    Для полноценного Telegram WebApp требуется публичный HTTPS.
+    Для полноценного Telegram WebApp нужен публичный HTTPS.
     Локально (http/localhost/127.0.0.1) — добавляем ?dev_tg=… для dev-режима.
     """
     url = WEBAPP_URL
@@ -177,7 +179,6 @@ async def register_user_via_api(tg_id: int | str, phone: str, first_name: str, l
     logging.error("POST /api/users/register payload=%s -> %s\n%s", payload, st, txt)
     raise RuntimeError(f"API POST error {st}: {txt}")
 
-
 # --------------------
 # Белый список (CSV)
 # --------------------
@@ -204,7 +205,6 @@ def load_participants(path: str) -> None:
 
 load_participants(PARTICIPANTS_CSV)
 
-
 # --------------------
 # FSM
 # --------------------
@@ -218,7 +218,6 @@ class PhotoStates(StatesGroup):
 
 
 router = Router()
-
 
 # --------------------
 # Помощники: roster / captain
@@ -314,7 +313,6 @@ def get_start_payload(message: Message) -> str | None:
 
 QR_PREFIX = "qr_"
 
-
 async def handle_qr_payload(message: Message, payload: str):
     st_check, _ = await api_get(f"/api/teams/by-tg/{message.from_user.id}")
     if st_check == 404:
@@ -377,7 +375,6 @@ async def handle_qr_payload(message: Message, payload: str):
         return
     await message.answer(f"Ошибка сервера ({st}). Попробуй позже.")
 
-
 # --------------------
 # Хендлеры
 # --------------------
@@ -401,14 +398,12 @@ async def start(message: Message):
         reply_markup=webapp_markup(message.from_user.id),
     )
 
-
 @router.message(F.text == "/app")
 async def open_app(message: Message):
     await message.answer(
         "Открой мини-приложение (встроенное в Telegram):",
         reply_markup=webapp_markup(message.from_user.id),
     )
-
 
 @router.message(F.text == "/reg")
 async def reg_flow(message: Message, state: FSMContext):
@@ -420,7 +415,6 @@ async def reg_flow(message: Message, state: FSMContext):
     await state.set_state(RegStates.waiting_phone)
     await message.answer("Шаг 1/2: поделись номером телефона (кнопка ниже).", reply_markup=kb)
 
-
 @router.message(F.text.regexp(r"^/scan(\s+.+)?$"))
 async def manual_scan(message: Message):
     txt = (message.text or "")
@@ -429,7 +423,6 @@ async def manual_scan(message: Message):
         return await message.answer("Использование: `/scan <код>`", parse_mode="Markdown")
     payload = parts[1].strip()
     await handle_qr_payload(message, payload)
-
 
 @router.message(F.text.regexp(r"^/rename(\s+.+)?$"))
 async def rename_team(message: Message):
@@ -457,7 +450,6 @@ async def rename_team(message: Message):
     if st == 404:
         return await message.answer("Пользователь не найден. Нужна повторная регистрация /reg.")
     await message.answer("Сервис недоступен, попробуй позже.")
-
 
 @router.message(F.text == "/startquest")
 async def start_quest(message: Message):
@@ -492,7 +484,6 @@ async def start_quest(message: Message):
         return await message.answer("Пользователь не найден. Пройди /reg.")
     return await message.answer("Сервис недоступен, попробуй позже.")
 
-
 @router.message(F.text.regexp(r"^/photo(\s+.+)?$"))
 async def photo_command(message: Message, state: FSMContext):
     parts = (message.text or "").split(maxsplit=1)
@@ -506,7 +497,6 @@ async def photo_command(message: Message, state: FSMContext):
     await state.update_data(photo_task_code=task_code)
     await state.set_state(PhotoStates.waiting_photo)
     await message.answer("Ок! Теперь пришли *фото* по этому заданию одной картинкой.", parse_mode="Markdown")
-
 
 @router.message(StateFilter(PhotoStates.waiting_photo), F.content_type == ContentType.PHOTO)
 async def on_photo(message: Message, state: FSMContext):
@@ -544,12 +534,10 @@ async def on_photo(message: Message, state: FSMContext):
         return await message.answer("Задание не найдено. Проверь код и попробуй ещё раз.")
     await message.answer("Сервис недоступен, попробуй позже.")
 
-
 @router.message(F.text == "/cancel")
 async def cancel_flow(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Ок, регистрацию отменил. В любой момент набери /reg.")
-
 
 @router.message(F.content_type == ContentType.CONTACT)
 async def on_contact(message: Message, state: FSMContext):
@@ -564,7 +552,6 @@ async def on_contact(message: Message, state: FSMContext):
     await state.update_data(phone=phone)
     await state.set_state(RegStates.waiting_name)
     await message.answer("Шаг 2/2: пришли *имя* (как тебя записать в команде).", parse_mode="Markdown")
-
 
 @router.message(StateFilter(RegStates.waiting_name), F.text)
 async def on_name(message: Message, state: FSMContext):
@@ -609,7 +596,6 @@ async def on_name(message: Message, state: FSMContext):
         logging.exception("Register API error")
         await message.answer("Сервер регистрации временно недоступен. Попробуй ещё раз через минутку.")
 
-
 @router.message(F.text == "/team")
 async def my_team(message: Message):
     try:
@@ -620,7 +606,6 @@ async def my_team(message: Message):
         return await message.answer(text, parse_mode="Markdown")
     except Exception:
         return await message.answer("Сервис недоступен, попробуй позже.")
-
 
 @router.message(F.text.in_({"/lb", "/leaderboard"}))
 async def leaderboard(message: Message):
@@ -650,7 +635,6 @@ async def leaderboard(message: Message):
         logging.exception("leaderboard error")
         await message.answer("Не удалось получить лидерборд.")
 
-
 @router.message(F.text == "/ping")
 async def ping_api(message: Message):
     try:
@@ -659,11 +643,21 @@ async def ping_api(message: Message):
     except Exception as e:
         await message.answer(f"API error: {e!r}")
 
-
+# --------------------
+# Обработчик ошибок (v3)
+# --------------------
 @router.errors()
-async def on_error(update, error):
-    logging.exception("Unhandled error: %s", error)
+async def on_error(event: ErrorEvent):
+    exc = event.exception
 
+    # Пользователь заблокировал бота — штатная ситуация
+    if isinstance(exc, TelegramForbiddenError):
+        logging.info("Ignored Forbidden: user blocked the bot")
+        return True  # помечаем как обработанную
+
+    # Остальные исключения логируем
+    logging.exception("Unhandled exception in bot", exc_info=exc)
+    return True
 
 # --------------------
 # Entry point
@@ -684,7 +678,6 @@ async def main():
                 await HTTP.close()
         except Exception:
             pass
-
 
 if __name__ == "__main__":
     asyncio.run(main())

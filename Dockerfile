@@ -1,41 +1,19 @@
-# ---- База ---------------------------------------------------------------
+# --- runtime ---
 FROM python:3.11-slim-bookworm
-
-# Используем зеркала (pip — Яндекс; apt — Яндекс + debian-security)
-ARG PIP_INDEX_URL=https://mirror.yandex.ru/mirrors/pypi/simple
-ARG PIP_EXTRA_INDEX_URL=
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_INDEX_URL=${PIP_INDEX_URL} \
-    PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL} \
-    PIP_DEFAULT_TIMEOUT=60 \
-    PIP_RETRIES=20
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# ---- APT: переключаем источники на зеркала и ставим curl ----------------
-# Заменяем список источников на свои, чтобы apt не упирался в недоступные зеркала
-RUN set -eux; \
-    # убираем все альтернативные источники (ключевой файл debian.sources!)
-    rm -f /etc/apt/sources.list.d/* /etc/apt/sources.list.d/debian.sources || true; \
-    # полностью переписываем sources.list под зеркало Яндекса
-    printf '%s\n' \
-      'deb http://mirror.yandex.ru/debian bookworm main contrib non-free non-free-firmware' \
-      'deb http://mirror.yandex.ru/debian bookworm-updates main contrib non-free non-free-firmware' \
-      'deb http://mirror.yandex.ru/debian bookworm-backports main contrib non-free non-free-firmware' \
-      'deb http://mirror.yandex.ru/debian-security bookworm-security main contrib non-free' \
-      > /etc/apt/sources.list; \
-    # делаем апдейт с таймаутами/ретраями
-    apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update -y; \
-    apt-get install -y --no-install-recommends curl ca-certificates; \
-    rm -rf /var/lib/apt/lists/*
-
-# ---- Python deps --------------------------------------------------------
 WORKDIR /code
+
+# кладём локальные "колёса" внутрь образа
+COPY wheelhouse/ /opt/wheels/
 COPY requirements.txt /tmp/requirements.txt
 
-# Обновляем pip и ставим зависимости через зеркало
-RUN python -m pip install --upgrade pip && \
-    pip install --no-cache-dir -r /tmp/requirements.txt
+# ставим ТОЛЬКО из /opt/wheels (без сети)
+RUN pip install --no-index --find-links=/opt/wheels -r /tmp/requirements.txt
 
-# ---- Код ----------------------------------------------------------------
+# затем код
 COPY . /code

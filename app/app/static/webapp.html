@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Cache-Control"
+      content="no-store, no-cache, must-revalidate"
+    />
+    <title>Quest Mini App</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+      :root {
+        --bg: #0e1621;
+        --card: #17212b;
+        --text: #e9edf1;
+        --muted: #8b98a5;
+        --acc: #2ea6ff;
+        --good: #3cb371;
+        --warn: #ffb020;
+      }
+      html,
+      body {
+        background: var(--bg);
+        color: var(--text);
+        margin: 0;
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu,
+          Cantarell, Noto Sans;
+      }
+      .wrap {
+        padding: 14px;
+      }
+      .tabs {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 10px;
+      }
+      .tab {
+        flex: 1;
+        text-align: center;
+        padding: 10px 12px;
+        border-radius: 10px;
+        background: var(--card);
+        cursor: pointer;
+        user-select: none;
+      }
+      .tab.active {
+        outline: 2px solid var(--acc);
+      }
+      .card {
+        background: var(--card);
+        border-radius: 14px;
+        padding: 14px;
+        margin-bottom: 12px;
+      }
+      .title {
+        font-size: 18px;
+        margin: 0 0 8px 0;
+      }
+      .muted {
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .btn {
+        background: var(--acc);
+        color: #fff;
+        border: 0;
+        padding: 12px 14px;
+        border-radius: 10px;
+        font-weight: 600;
+        width: 100%;
+        cursor: pointer;
+      }
+      .btn:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+      .kv {
+        display: flex;
+        justify-content: space-between;
+        padding: 8px 0;
+        border-bottom: 1px solid #223042;
+      }
+      .kv:last-child {
+        border-bottom: 0;
+      }
+      a {
+        color: var(--acc);
+        text-decoration: none;
+      }
+      .table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      .table th,
+      .table td {
+        padding: 8px;
+        border-bottom: 1px solid #223042;
+        text-align: left;
+        color: var(--text);
+      }
+      .badge {
+        padding: 2px 6px;
+        border-radius: 6px;
+        background: #223042;
+        font-size: 12px;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas,
+          "Liberation Mono", monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="tabs">
+        <div class="tab active" data-tab="team">Команда</div>
+        <div class="tab" data-tab="task">Задание</div>
+        <div class="tab" data-tab="board">Лидерборд</div>
+      </div>
+
+      <section id="pane-team">
+        <div class="card">
+          <h3 class="title">Твоя команда</h3>
+          <div id="team-name" class="row">
+            <span>—</span> <span class="badge" id="team-state">—</span>
+          </div>
+          <div class="kv">
+            <span>Выполнено</span><strong id="team-solved">—</strong>
+          </div>
+          <div class="kv">
+            <span>Старт</span
+            ><span id="team-started" class="mono muted">—</span>
+          </div>
+          <div class="kv">
+            <span>Финиш</span
+            ><span id="team-finished" class="mono muted">—</span>
+          </div>
+        </div>
+        <div class="card">
+          <button id="btn-start" class="btn">Начать квест</button>
+          <p class="muted" style="margin-top: 8px">
+            Кнопка доступна только капитану, один раз на команду.
+          </p>
+        </div>
+      </section>
+
+      <section id="pane-task" style="display: none">
+        <div class="card">
+          <h3 id="task-title" class="title">—</h3>
+          <p id="task-desc">—</p>
+          <div
+            id="task-map"
+            class="row"
+            style="margin-top: 10px; display: none"
+          >
+            <a id="task-map-link" class="btn" target="_blank" rel="noopener"
+              >Открыть в Яндекс.Картах</a
+            >
+            <button id="btn-copy" class="btn" style="background: #3cb371">
+              Скопировать ссылку
+            </button>
+          </div>
+          <p id="task-note" class="muted" style="margin-top: 8px"></p>
+        </div>
+      </section>
+
+      <section id="pane-board" style="display: none">
+        <div class="card">
+          <table class="table" id="tbl-board">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Команда</th>
+                <th>Задания</th>
+                <th>Время</th>
+              </tr>
+            </thead>
+            <tbody id="tbl-board-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <script>
+      (function () {
+        const tg = window.Telegram?.WebApp;
+        tg?.expand();
+        tg?.ready();
+
+        // Tabs
+        const tabs = document.querySelectorAll(".tab");
+        const panes = {
+          team: document.getElementById("pane-team"),
+          task: document.getElementById("pane-task"),
+          board: document.getElementById("pane-board"),
+        };
+        tabs.forEach((t) =>
+          t.addEventListener("click", () => {
+            tabs.forEach((x) => x.classList.remove("active"));
+            Object.values(panes).forEach((p) => (p.style.display = "none"));
+            t.classList.add("active");
+            panes[t.dataset.tab].style.display = "";
+          })
+        );
+
+        // Utils
+        const isFiniteNum = (v) => typeof v === "number" && Number.isFinite(v);
+        const toNum = (v) => {
+          const n = Number(v);
+          return Number.isFinite(n) ? n : null;
+        };
+
+        function fmtTime(iso) {
+          if (!iso) return "—";
+          const d = new Date(iso);
+          return isNaN(d.getTime()) ? "—" : d.toLocaleString();
+        }
+        function fmtDur(sec) {
+          if (sec == null) return "—";
+          const s = Math.max(0, Math.floor(sec));
+          const hh = String(Math.floor(s / 3600)).padStart(2, "0");
+          const mm = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
+          const ss = String(Math.floor(s % 60)).padStart(2, "0");
+          return `${hh}:${mm}:${ss}`;
+        }
+
+        async function fetchSummary() {
+          const init_data = tg?.initData || "";
+          const res = await fetch(
+            `/api/webapp/summary?init_data=${encodeURIComponent(init_data)}`
+          );
+          if (!res.ok) throw new Error("summary failed");
+          return await res.json();
+        }
+        async function fetchLeaderboard() {
+          const res = await fetch("/api/webapp/leaderboard");
+          if (!res.ok) throw new Error("leaderboard failed");
+          const data = await res.json();
+          return data.leaderboard || [];
+        }
+
+        function renderTeam(s) {
+          const t = s.team || {};
+          // надёжный счётчик: team.solved/total, если нет — score.done/total
+          let solved = toNum(t.solved);
+          let total = toNum(t.total);
+          if (solved === null || total === null) {
+            solved = solved ?? toNum(s?.score?.done);
+            total = total ?? toNum(s?.score?.total);
+          }
+          const solvedText = `${solved ?? "—"}/${total ?? "—"}`;
+
+          document.getElementById("team-name").children[0].innerText =
+            t.team_name ?? "—";
+          document.getElementById("team-solved").innerText = solvedText;
+          document.getElementById("team-started").innerText = fmtTime(
+            t.started_at
+          );
+          document.getElementById("team-finished").innerText = fmtTime(
+            t.finished_at
+          );
+
+          const badge = document.getElementById("team-state");
+          badge.innerText = t.finished_at
+            ? "Финиш"
+            : t.started_at
+            ? "В пути"
+            : "Не начат";
+
+          document.getElementById("btn-start").disabled = !(
+            s.is_captain && !t.started_at
+          );
+        }
+
+        function renderTask(s) {
+          const t = s.team || {};
+          const c = s.current_task;
+          const title = document.getElementById("task-title");
+          const desc = document.getElementById("task-desc");
+          const note = document.getElementById("task-note");
+          const mapBox = document.getElementById("task-map");
+          const mapLink = document.getElementById("task-map-link");
+
+          if (t.finished_at) {
+            title.innerText = "Квест завершён 🎉";
+            desc.innerText = "Поздравляем! Возвращайтесь к координаторам.";
+            mapBox.style.display = "none";
+            note.innerText = "";
+            return;
+          }
+          if (!t.started_at) {
+            title.innerText = "Квест ещё не начат";
+            desc.innerText =
+              "Капитан должен нажать «Начать квест». После старта появится первое задание.";
+            if (s.first_task_map) {
+              mapBox.style.display = "";
+              mapLink.href = s.first_task_map;
+            } else {
+              mapBox.style.display = "none";
+            }
+            note.innerText = "";
+            return;
+          }
+          if (!c) {
+            title.innerText = "Задания закончились";
+            desc.innerText =
+              "Если вы это видите, дождитесь фиксации финиша координатором.";
+            mapBox.style.display = "none";
+            note.innerText = "";
+            return;
+          }
+
+          title.innerText = c.title || "—";
+          desc.innerText = c.description || "—";
+          if (c.map_url) {
+            mapBox.style.display = "";
+            mapLink.href = c.map_url;
+            note.innerText = "Откройте карту и двигайтесь к точке.";
+          } else {
+            mapBox.style.display = "none";
+            note.innerText = "";
+          }
+        }
+
+        function renderBoard(rows) {
+          const tbody = document.getElementById("tbl-board-body");
+          tbody.innerHTML = "";
+          const now = Date.now() / 1000;
+
+          rows.forEach((r, idx) => {
+            const tr = document.createElement("tr");
+            const rank = document.createElement("td");
+            rank.textContent = String(idx + 1);
+            const name = document.createElement("td");
+            name.textContent = r.team_name ?? "—";
+            const solved = document.createElement("td");
+            solved.textContent = `${toNum(r.solved) ?? 0}/${
+              toNum(r.total) ?? 0
+            }`;
+            const time = document.createElement("td");
+
+            if (r.finished_at) {
+              time.textContent = fmtDur(r.duration_sec);
+            } else if (r.started_at) {
+              const startSec = Math.floor(
+                new Date(r.started_at).getTime() / 1000
+              );
+              const base = now - startSec;
+              time.dataset.t0 = String(startSec);
+              time.textContent = fmtDur(base);
+            } else {
+              time.textContent = "—";
+            }
+
+            tr.append(rank, name, solved, time);
+            tbody.appendChild(tr);
+          });
+
+          if (window.__lbTimer) clearInterval(window.__lbTimer);
+          window.__lbTimer = setInterval(() => {
+            document
+              .querySelectorAll("#tbl-board-body td[data-t0]")
+              .forEach((td) => {
+                const t0 = parseInt(td.dataset.t0, 10);
+                const elapsed = Math.floor(Date.now() / 1000) - t0;
+                td.textContent = fmtDur(elapsed);
+              });
+          }, 1000);
+        }
+
+        async function refresh() {
+          try {
+            const s = await fetchSummary();
+            renderTeam(s);
+            renderTask(s);
+
+            let rows = Array.isArray(s.leaderboard) ? s.leaderboard : [];
+            if (!rows.length) {
+              try {
+                rows = await fetchLeaderboard();
+              } catch {}
+            }
+            renderBoard(rows);
+          } catch (e) {
+            console.error(e);
+            tg?.showAlert("Не удалось загрузить данные. Попробуйте позже.");
+          }
+        }
+
+        // Actions
+        document
+          .getElementById("btn-start")
+          .addEventListener("click", async () => {
+            const init_data = tg?.initData || "";
+            const res = await fetch("/api/webapp/start", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ init_data }),
+            });
+            if (!res.ok) {
+              const t = await res.text();
+              tg?.showAlert(`Старт не удался: ${t}`);
+              return;
+            }
+            const data = await res.json();
+            if (data.map_url) {
+              try {
+                tg?.sendData(
+                  JSON.stringify({
+                    type: "quest_started",
+                    map_url: data.map_url,
+                  })
+                );
+              } catch (e) {}
+            }
+            await refresh();
+            tg?.showAlert("Квест начат! Удачи!");
+            document.querySelector('.tab[data-tab="task"]').click();
+          });
+
+        document
+          .getElementById("btn-copy")
+          .addEventListener("click", async () => {
+            const href = document.getElementById("task-map-link").href;
+            try {
+              await navigator.clipboard.writeText(href);
+              tg?.showPopup({
+                title: "Скопировано",
+                message: "Ссылка на карту в буфере обмена",
+                buttons: [{ type: "close" }],
+              });
+            } catch (e) {
+              tg?.showAlert("Не удалось скопировать");
+            }
+          });
+
+        refresh();
+      })();
+    </script>
+  </body>
+</html>

@@ -1,38 +1,64 @@
+# app/app/webapp.py
 import os
 import hmac
 import json
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 from urllib.parse import parse_qsl, unquote_plus
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from .database import get_db
 from . import models
 
-# Two routers:
-# 1) page_router -> serves the HTML Mini App at /webapp
-# 2) router (api_router) -> JSON API for the Mini App under /api/webapp/*
+# 1) HTML страница /webapp
 page_router = APIRouter(tags=["webapp-page"])
+# 2) JSON API /api/webapp/*
 router = APIRouter(prefix="/api/webapp", tags=["webapp"])
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-# If BOT_TOKEN is missing we won't crash on startup; requests will get 500 on verification.
 
+# Базовые пути
+PKG_DIR = Path(__file__).resolve().parent      # /code/app/app
+APP_DIR = PKG_DIR.parent                        # /code/app
+STATIC_DIR = Path(os.getenv("STATIC_DIR", str(APP_DIR / "static")))
 
-# --- Telegram WebApp initData verification ---------------------------------
+# --------------------- Поиск webapp.html ---------------------
+def _find_webapp_html() -> Path | None:
+    """
+    Ищем webapp.html в популярных местах:
+      1) WEBAPP_HTML (ENV) — точный путь
+      2) ${STATIC_DIR}/webapp.html                (по умолчанию /code/app/static/webapp.html)
+      3) ${PKG_DIR}/static/webapp.html            (/code/app/app/static/webapp.html)
+    """
+    candidates: list[Path] = []
+    env_html = os.getenv("WEBAPP_HTML", "").strip()
+    if env_html:
+        candidates.append(Path(env_html))
+    candidates.append(STATIC_DIR / "webapp.html")
+    candidates.append(PKG_DIR / "static" / "webapp.html")
+
+    for p in candidates:
+        if p.is_file():
+            return p
+    return None
+
+# --------------------- Telegram WebApp initData verification ------------------
+# Док: https://core.telegram.org/bots/webapps#validating-data-received-via-the-web-app
 
 def _calc_telegram_hash(data_check_string: str) -> str:
-    secret_key = hashlib.sha256(BOT_TOKEN.encode("utf-8")).digest()
+    # секрет = HMAC_SHA256(key="WebAppData", msg=BOT_TOKEN)
+    secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode("utf-8"), hashlib.sha256).digest()
+    # итоговая подпись = HMAC_SHA256(secret_key, data_check_string)
     return hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def _verify_init_data(init_data: str) -> Dict[str, Any]:
-    """Validate Telegram initData and return parsed dict (with 'user')."""
     if not BOT_TOKEN:
         raise HTTPException(500, "BOT_TOKEN is not configured on server")
 
@@ -41,14 +67,19 @@ def _verify_init_data(init_data: str) -> Dict[str, Any]:
     if not provided_hash:
         raise HTTPException(401, "Missing hash")
 
-    pairs = [f"{k}={parsed[k]}" for k in sorted(parsed.keys())]
-    dcs = "\n".join(pairs)
-    good_hash = _calc_telegram_hash(dcs)
+    data_check_string = "\n".join(f"{k}={parsed[k]}" for k in sorted(parsed.keys()))
+    good_hash = _calc_telegram_hash(data_check_string)
     if not hmac.compare_digest(good_hash, provided_hash):
         raise HTTPException(401, "Bad initData signature")
 
+    # user — JSON-строка
     user_raw = parsed.get("user")
-    user = json.loads(unquote_plus(user_raw)) if user_raw else None
+    user = None
+    if user_raw:
+        try:
+            user = json.loads(user_raw)
+        except Exception:
+            user = json.loads(unquote_plus(user_raw))
     if not user or "id" not in user:
         raise HTTPException(401, "No user in initData")
 
@@ -56,26 +87,48 @@ def _verify_init_data(init_data: str) -> Dict[str, Any]:
     return parsed
 
 
-# --- DB helpers ------------------------------------------------------------
+# ------------------------------- DB helpers ----------------------------------
 
 def _tasks_total(db: Session) -> int:
-    return db.query(models.Task).filter(models.Task.is_active == True).count()  # noqa: E712
+    return (
+        db.query(func.count(models.Task.id))
+        .filter(models.Task.is_active == True)  # noqa: E712
+        .scalar()
+    ) or 0
 
 
 def _solved_count(db: Session, team_id: int) -> int:
     return (
-        db.query(models.Task)
-        .join(models.TeamTaskProgress, models.TeamTaskProgress.task_id == models.Task.id)
-        .filter(models.TeamTaskProgress.team_id == team_id, models.TeamTaskProgress.status == "APPROVED")
-        .count()
-    )
+        db.query(func.count(models.TeamTaskProgress.id))
+        .filter(
+            models.TeamTaskProgress.team_id == team_id,
+            models.TeamTaskProgress.status == "APPROVED",
+        )
+        .scalar()
+    ) or 0
+
+
+def _approved_points(db: Session, team_id: int) -> int:
+    return (
+        db.query(func.coalesce(func.sum(models.Task.points), 0))
+        .select_from(models.TeamTaskProgress)
+        .join(models.Task, models.Task.id == models.TeamTaskProgress.task_id)
+        .filter(
+            models.TeamTaskProgress.team_id == team_id,
+            models.TeamTaskProgress.status == "APPROVED",
+        )
+        .scalar()
+    ) or 0
 
 
 def _current_task(db: Session, team_id: int) -> Optional[models.Task]:
-    """First active task (by order, then id) that has not yet been approved by the team."""
+    """Первое активное задание, которое ещё не APPROVED у команды."""
     subq = (
         db.query(models.TeamTaskProgress.task_id)
-        .filter(models.TeamTaskProgress.team_id == team_id, models.TeamTaskProgress.status == "APPROVED")
+        .filter(
+            models.TeamTaskProgress.team_id == team_id,
+            models.TeamTaskProgress.status == "APPROVED",
+        )
         .subquery()
     )
     return (
@@ -91,45 +144,42 @@ def _team_for_tg(db: Session, tg_id: str) -> tuple[models.Team, models.TeamMembe
     user = db.query(models.User).filter(models.User.tg_id == tg_id).one_or_none()
     if not user:
         raise HTTPException(404, "User not found")
-
     member = db.query(models.TeamMember).filter(models.TeamMember.user_id == user.id).one_or_none()
     if not member:
         raise HTTPException(409, "User has no team")
-
     team = db.get(models.Team, member.team_id)
     return team, member, user
 
 
 def _leaderboard(db: Session) -> List[Dict[str, Any]]:
     """
-    Scoreboard:
-      - solved tasks count
-      - duration: finished_at - started_at (or now - started_at for running)
-    Sorting:
-      1) finished first, by ascending duration
-      2) then running/idle teams by solved desc
-      3) then by team_id asc
+    Счёт: число решённых задач; длительность: finished_at - started_at
+    Сортировка:
+      1) завершившие — по возрастанию длительности,
+      2) затем начатые — по убыванию solved,
+      3) затем не начатые — по id.
     """
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     total = _tasks_total(db)
     teams = db.query(models.Team).order_by(models.Team.id.asc()).all()
 
-    result: List[Dict[str, Any]] = []
+    rows: List[Dict[str, Any]] = []
     for t in teams:
         solved = _solved_count(db, t.id)
         started_at = t.started_at
         finished_at = t.finished_at
 
-        # Auto-finish by last completed_at if all tasks solved and finished_at is empty
         if solved == total and total > 0 and not finished_at:
+            # если все закрыты, но финал не проставлен — берём последнее completed_at
             max_completed = (
                 db.query(func.max(models.TeamTaskProgress.completed_at))
-                .filter(models.TeamTaskProgress.team_id == t.id, models.TeamTaskProgress.status == "APPROVED")
+                .filter(
+                    models.TeamTaskProgress.team_id == t.id,
+                    models.TeamTaskProgress.status == "APPROVED",
+                )
                 .scalar()
             )
             finished_at = max_completed
-
-        running = bool(started_at and not finished_at and solved < total)
 
         duration_sec: Optional[int] = None
         if started_at:
@@ -137,35 +187,33 @@ def _leaderboard(db: Session) -> List[Dict[str, Any]]:
             try:
                 duration_sec = int((end_time - started_at).total_seconds())
             except Exception:
-                # If tz-aware vs naive clash somehow slips in, fallback to string compare not needed — just skip duration
                 duration_sec = None
 
-        result.append({
+        rows.append({
             "team_id": t.id,
             "team_name": t.name,
-            "solved": solved,
-            "total": total,
+            "solved": int(solved),
+            "total": int(total),
             "started_at": started_at.isoformat() if started_at else None,
             "finished_at": finished_at.isoformat() if finished_at else None,
             "duration_sec": duration_sec,
-            "running": running,
         })
 
-    def _key(row: Dict[str, Any]):
-        if row["finished_at"]:
-            return (0, row["duration_sec"] or 10**12, row["team_id"])
-        # unfinished
-        return (1, -(row["solved"]), row["team_id"])
+    def _key(r: Dict[str, Any]):
+        finished = r["finished_at"] is not None
+        started = r["started_at"] is not None
+        if finished:
+            return (0, r["duration_sec"] or 10**12, r["team_id"])
+        if started:
+            return (1, -int(r["solved"]), r["team_id"])
+        return (2, r["team_id"])
 
-    result.sort(key=_key)
-    return result
+    rows.sort(key=_key)
+    return rows
 
 
 def _yandex_url(task: models.Task) -> Optional[str]:
-    """
-    Optional map link if Task has lat/lon columns.
-    Current model doesn't define them — will return None.
-    """
+    """Если у задания будут lat/lon — вернём ссылку на Я.Карты. Сейчас вернёт None."""
     if getattr(task, "lat", None) is not None and getattr(task, "lon", None) is not None:
         lat = float(task.lat)
         lon = float(task.lon)
@@ -173,302 +221,45 @@ def _yandex_url(task: models.Task) -> Optional[str]:
     return None
 
 
-# --- HTML Mini App --------------------------------------------------------
-
+# --- ХЭНДЛЕР СТРАНИЦЫ ---
 @page_router.get("/webapp", response_class=HTMLResponse)
-def webapp_index():
-    """Serve the Mini App (single-page HTML with inline CSS/JS)."""
-    html = """
-<!doctype html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Quest Mini App</title>
-  <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <style>
-    :root { --bg:#0e1621; --card:#17212b; --text:#e9edf1; --muted:#8b98a5; --acc:#2ea6ff; --good:#3cb371; --warn:#ffb020; }
-    html, body { background: var(--bg); color: var(--text); margin:0; font-family: system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans; }
-    .wrap { padding: 14px; }
-    .tabs { display:flex; gap:8px; margin-bottom:10px; }
-    .tab { flex:1; text-align:center; padding:10px 12px; border-radius:10px; background:var(--card); cursor:pointer; user-select:none; }
-    .tab.active { outline:2px solid var(--acc); }
-    .card { background:var(--card); border-radius:14px; padding:14px; margin-bottom:12px; }
-    .title { font-size:18px; margin:0 0 8px 0; }
-    .muted { color:var(--muted); font-size:13px; }
-    .btn { background:var(--acc); color:#fff; border:0; padding:12px 14px; border-radius:10px; font-weight:600; width:100%; cursor:pointer; }
-    .btn:disabled { opacity:.6; cursor:not-allowed; }
-    .grid { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
-    .kv { display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid #223042; }
-    .kv:last-child { border-bottom:0; }
-    a { color:var(--acc); text-decoration:none; }
-    .table { width:100%; border-collapse: collapse; }
-    .table th, .table td { padding:8px; border-bottom:1px solid #223042; text-align:left; }
-    .badge { padding:2px 6px; border-radius:6px; background:#223042; font-size:12px; }
-    .row { display:flex; align-items:center; justify-content:space-between; gap:10px; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
-  </style>
-</head>
-<body>
-<div class="wrap">
-  <div class="tabs">
-    <div class="tab active" data-tab="team">Команда</div>
-    <div class="tab" data-tab="task">Задание</div>
-    <div class="tab" data-tab="board">Лидерборд</div>
-  </div>
+def miniapp_page():
+    p = _find_webapp_html()
+    if p:
+        return FileResponse(str(p), media_type="text/html; charset=utf-8")
 
-  <section id="pane-team">
-    <div class="card">
-      <h3 class="title">Твоя команда</h3>
-      <div id="team-name" class="row"><span>—</span> <span class="badge" id="team-state">—</span></div>
-      <div class="kv"><span>Выполнено</span><strong id="team-solved">—</strong></div>
-      <div class="kv"><span>Старт</span><span id="team-started" class="mono muted">—</span></div>
-      <div class="kv"><span>Финиш</span><span id="team-finished" class="mono muted">—</span></div>
-    </div>
-    <div class="card">
-      <button id="btn-start" class="btn">Начать квест</button>
-      <p class="muted" style="margin-top:8px">Кнопка доступна только капитану, один раз на команду.</p>
-    </div>
-  </section>
+    looked = [
+        os.getenv("WEBAPP_HTML", "").strip() or "(not set)",
+        str(STATIC_DIR / "webapp.html"),
+        str(PKG_DIR / "static" / "webapp.html"),
+    ]
+    return HTMLResponse(
+        status_code=404,
+        content=json.dumps({"detail": "webapp.html not found", "looked_at": looked}, ensure_ascii=False),
+        media_type="application/json; charset=utf-8",
+    )
 
-  <section id="pane-task" style="display:none">
-    <div class="card">
-      <h3 id="task-title" class="title">—</h3>
-      <p id="task-desc">—</p>
-      <div id="task-map" class="row" style="margin-top:10px; display:none">
-        <a id="task-map-link" class="btn" target="_blank" rel="noopener">Открыть в Яндекс.Картах</a>
-        <button id="btn-copy" class="btn" style="background:#3cb371">Скопировать ссылку</button>
-      </div>
-      <p id="task-note" class="muted" style="margin-top:8px"></p>
-    </div>
-  </section>
-
-  <section id="pane-board" style="display:none">
-    <div class="card">
-      <table class="table" id="tbl-board">
-        <thead><tr><th>#</th><th>Команда</th><th>Задания</th><th>Время</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </section>
-</div>
-
-<script>
-(function(){
-  const tg = window.Telegram?.WebApp;
-  tg?.expand();
-  tg?.ready();
-
-  const tabs = document.querySelectorAll('.tab');
-  const panes = {
-    team: document.getElementById('pane-team'),
-    task: document.getElementById('pane-task'),
-    board: document.getElementById('pane-board'),
-  };
-  tabs.forEach(t => t.addEventListener('click', () => {
-    tabs.forEach(x => x.classList.remove('active'));
-    Object.values(panes).forEach(p => p.style.display='none');
-    t.classList.add('active');
-    panes[t.dataset.tab].style.display = '';
-  }));
-
-  const state = { summary: null, leaderboardTimer: null };
-
-  function fmtTime(iso){
-    if(!iso) return '—';
-    const d = new Date(iso);
-    return d.toLocaleString();
-  }
-
-  function fmtDur(sec){
-    if(sec == null) return '—';
-    const s = Math.max(0, Math.floor(sec));
-    const hh = Math.floor(s/3600).toString().padStart(2,'0');
-    const mm = Math.floor((s%3600)/60).toString().padStart(2,'0');
-    const ss = Math.floor(s%60).toString().padStart(2,'0');
-    return `${hh}:${mm}:${ss}`;
-  }
-
-  async function fetchSummary(){
-    const init_data = tg?.initData || '';
-    const res = await fetch(`/api/webapp/summary?init_data=${encodeURIComponent(init_data)}`);
-    if(!res.ok){ throw new Error('summary failed'); }
-    return await res.json();
-  }
-
-  function renderTeam(s){
-    const t = s.team;
-    document.getElementById('team-name').children[0].innerText = t.team_name;
-    document.getElementById('team-solved').innerText = `${t.solved}/${t.total}`;
-    document.getElementById('team-started').innerText = fmtTime(t.started_at);
-    document.getElementById('team-finished').innerText = fmtTime(t.finished_at);
-    const badge = document.getElementById('team-state');
-    badge.innerText = t.finished_at ? 'Финиш' : (t.started_at ? 'В пути' : 'Не начат');
-    document.getElementById('btn-start').disabled = !(s.is_captain && !t.started_at);
-  }
-
-  function renderTask(s){
-    const c = s.current_task;
-    const title = document.getElementById('task-title');
-    const desc = document.getElementById('task-desc');
-    const note = document.getElementById('task-note');
-    const mapBox = document.getElementById('task-map');
-    const mapLink = document.getElementById('task-map-link');
-
-    if(s.team.finished_at){
-      title.innerText = 'Квест завершён 🎉';
-      desc.innerText = 'Поздравляем! Возвращайтесь к координаторам.';
-      mapBox.style.display = 'none';
-      note.innerText = '';
-      return;
-    }
-
-    if(!s.team.started_at){
-      title.innerText = 'Квест ещё не начат';
-      desc.innerText = 'Капитан должен нажать «Начать квест». После старта появится первое задание.';
-      if(s.first_task_map){
-        mapBox.style.display = '';
-        mapLink.href = s.first_task_map;
-      } else {
-        mapBox.style.display = 'none';
-      }
-      note.innerText = '';
-      return;
-    }
-
-    if(!c){
-      title.innerText = 'Задания закончились';
-      desc.innerText = 'Если вы это видите, дождитесь фиксации финиша координатором.';
-      mapBox.style.display = 'none';
-      note.innerText = '';
-      return;
-    }
-
-    title.innerText = c.title;
-    desc.innerText = c.description || '—';
-    if(c.map_url){
-      mapBox.style.display = '';
-      mapLink.href = c.map_url;
-      note.innerText = 'Откройте карту и двигайтесь к точке.';
-    } else {
-      mapBox.style.display = 'none';
-      note.innerText = '';
-    }
-  }
-
-  function renderBoard(s){
-    const tbody = document.querySelector('#tbl-board tbody');
-    tbody.innerHTML = '';
-    const rows = s.leaderboard || [];
-    const now = Date.now() / 1000;
-
-    rows.forEach((r, idx) => {
-      const tr = document.createElement('tr');
-      const timeCell = document.createElement('td');
-
-      const rank = document.createElement('td'); rank.innerText = (idx+1).toString();
-      const name = document.createElement('td'); name.innerText = r.team_name;
-      const solved = document.createElement('td'); solved.innerText = `${r.solved}/${r.total}`;
-
-      if(r.finished_at){
-        timeCell.innerText = fmtDur(r.duration_sec);
-      } else if(r.started_at){
-        const startSec = Math.floor(new Date(r.started_at).getTime()/1000);
-        const base = now - startSec;
-        timeCell.dataset.t0 = startSec.toString();
-        timeCell.dataset.base = base.toString();
-        timeCell.innerText = fmtDur(base);
-      } else {
-        timeCell.innerText = '—';
-      }
-
-      tr.append(rank, name, solved, timeCell);
-      tbody.appendChild(tr);
-    });
-
-    // обновляем бегущие таймеры раз в секунду
-    if(state.leaderboardTimer) clearInterval(state.leaderboardTimer);
-    state.leaderboardTimer = setInterval(() => {
-      document.querySelectorAll('#tbl-board tbody td[data-t0]').forEach(td => {
-        const t0 = parseInt(td.dataset.t0, 10);
-        const elapsed = Math.floor(Date.now()/1000) - t0;
-        td.innerText = fmtDur(elapsed);
-      });
-    }, 1000);
-  }
-
-  async function refresh(){
-    try{
-      const s = await fetchSummary();
-      state.summary = s;
-      renderTeam(s);
-      renderTask(s);
-      renderBoard(s);
-    } catch(e){
-      console.error(e);
-      tg?.showAlert('Не удалось загрузить данные. Попробуйте позже.');
-    }
-  }
-
-  // кнопки
-  document.getElementById('btn-start').addEventListener('click', async () => {
-    const init_data = tg?.initData || '';
-    const res = await fetch('/api/webapp/start', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ init_data })
-    });
-    if(!res.ok){
-      const t = await res.text();
-      tg?.showAlert(`Старт не удался: ${t}`);
-      return;
-    }
-    const data = await res.json();
-    if(data.map_url){
-      // Можно отправить в чат через sendData, если бот обрабатывает web_app_data
-      try{ tg?.sendData(JSON.stringify({type:'quest_started', map_url: data.map_url})); }catch(e){}
-    }
-    await refresh();
-    tg?.showAlert('Квест начат! Удачи!');
-    // Переключим на вкладку "Задание"
-    document.querySelector('.tab[data-tab="task"]').click();
-  });
-
-  document.getElementById('btn-copy').addEventListener('click', async () => {
-    const href = document.getElementById('task-map-link').href;
-    try{
-      await navigator.clipboard.writeText(href);
-      tg?.showPopup({title:'Скопировано', message:'Ссылка на карту в буфере обмена', buttons:[{type:'close'}]});
-    }catch(e){
-      tg?.showAlert('Не удалось скопировать');
-    }
-  });
-
-  refresh();
-})();
-</script>
-</body>
-</html>
-    """.strip()
-    return HTMLResponse(content=html)
-
-
-# --- JSON API for Mini App ------------------------------------------------
+# ------------------------------- JSON API ------------------------------------
 
 @router.get("/summary", response_class=JSONResponse)
 def webapp_summary(init_data: str = Query(...), db: Session = Depends(get_db)):
     data = _verify_init_data(init_data)
     tg_id = str(data["user"]["id"])
-    team, member, _user = _team_for_tg(db, tg_id)
+    team, member, _ = _team_for_tg(db, tg_id)
 
     total = _tasks_total(db)
     solved = _solved_count(db, team.id)
+    points = _approved_points(db, team.id)
     cur_task = _current_task(db, team.id)
 
     finished_at = team.finished_at
     if solved == total and total > 0 and not finished_at:
         finished_at = (
             db.query(func.max(models.TeamTaskProgress.completed_at))
-            .filter(models.TeamTaskProgress.team_id == team.id, models.TeamTaskProgress.status == "APPROVED")
+            .filter(
+                models.TeamTaskProgress.team_id == team.id,
+                models.TeamTaskProgress.status == "APPROVED",
+            )
             .scalar()
         )
 
@@ -480,14 +271,20 @@ def webapp_summary(init_data: str = Query(...), db: Session = Depends(get_db)):
     )
 
     out: Dict[str, Any] = {
-        "is_captain": (member.role == "CAPTAIN"),
+        "ok": True,
+        "is_captain": ((member.role or "").upper() == "CAPTAIN"),
         "team": {
             "team_id": team.id,
             "team_name": team.name,
             "started_at": team.started_at.isoformat() if team.started_at else None,
             "finished_at": finished_at.isoformat() if finished_at else None,
-            "solved": solved,
-            "total": total,
+            "solved": int(solved),
+            "total": int(total),
+        },
+        "score": {  # совместимость
+            "done": int(solved),
+            "total": int(total),
+            "points": int(points),
         },
         "current_task": None,
         "first_task_map": _yandex_url(first_task) if first_task else None,
@@ -504,14 +301,19 @@ def webapp_summary(init_data: str = Query(...), db: Session = Depends(get_db)):
     return JSONResponse(out)
 
 
+@router.get("/leaderboard", response_class=JSONResponse)
+def webapp_leaderboard(db: Session = Depends(get_db)):
+    return JSONResponse({"ok": True, "leaderboard": _leaderboard(db)})
+
+
 @router.post("/start", response_class=JSONResponse)
 def webapp_start(body: Dict[str, Any] = Body(...), db: Session = Depends(get_db)):
     init_data = body.get("init_data") or ""
     data = _verify_init_data(init_data)
     tg_id = str(data["user"]["id"])
-    team, member, _user = _team_for_tg(db, tg_id)
+    team, member, _ = _team_for_tg(db, tg_id)
 
-    if member.role != "CAPTAIN":
+    if (member.role or "").upper() != "CAPTAIN":
         raise HTTPException(403, "Only captain can start")
 
     if team.started_at:
@@ -523,7 +325,7 @@ def webapp_start(body: Dict[str, Any] = Body(...), db: Session = Depends(get_db)
         )
         return JSONResponse({"ok": True, "already": True, "map_url": _yandex_url(task) if task else None})
 
-    team.started_at = datetime.utcnow()
+    team.started_at = datetime.now(timezone.utc)
     db.commit()
 
     first = _current_task(db, team.id) or (

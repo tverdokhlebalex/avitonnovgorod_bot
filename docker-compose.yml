@@ -1,3 +1,5 @@
+version: "3.9"
+
 services:
   db:
     image: postgres:15
@@ -10,11 +12,7 @@ services:
     volumes:
       - db_data:/var/lib/postgresql/data
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "pg_isready -U questbot -d questbot -h localhost || exit 1",
-        ]
+      test: ["CMD-SHELL", "pg_isready -U questbot -d questbot -h localhost || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -33,21 +31,38 @@ services:
     build:
       context: .
       args:
-        # Dockerfile уже содержит дефолтное зеркало pip; аргументом можно переопределить при желании
         PIP_INDEX_URL: https://mirror.yandex.ru/mirrors/pypi/simple
     working_dir: /code/app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     env_file:
       - .env
     environment:
-      # Явно пробрасываем строку подключения — сервисы в одной сети, используем имя контейнера db
+      # DB (всё внутри одной сети — используем имя сервиса db)
       DATABASE_URL: postgresql+psycopg://questbot:questbot@db:5432/questbot
       DB_HOST: db
       DB_PORT: "5432"
       DB_NAME: questbot
       DB_USER: questbot
       DB_PASSWORD: questbot
+
+      # Redis
+      REDIS_HOST: redis
+
+      # Проектные переменные — явно пробрасываем из .env
+      APP_SECRET: ${APP_SECRET}
+      ADMIN_SECRET: ${ADMIN_SECRET}
+      BOT_TOKEN: ${BOT_TOKEN}
+      API_URL: ${API_URL}
+      TEAM_SIZE: ${TEAM_SIZE}
+      ROUTE_COUNT: ${ROUTE_COUNT}
       PROOFS_DIR: /code/data/proofs
+      STRICT_WHITELIST: ${STRICT_WHITELIST}
+      WHITELIST_PATH: ${WHITELIST_PATH}
+      COORDINATOR_CONTACT: ${COORDINATOR_CONTACT}
+      WEBAPP_URL: ${WEBAPP_URL}
+      PUBLIC_WEBAPP_URL: ${PUBLIC_WEBAPP_URL}
+      WEBAPP_HTML_PATH: /code/app/app/static/webapp.html
+
     depends_on:
       db:
         condition: service_healthy
@@ -56,20 +71,11 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # код монтируем с хоста для быстрых обновлений через `git pull`
       - .:/code
-      # фото — в отдельный том (переживёт пересборки)
       - proofs_data:/code/data/proofs
     restart: unless-stopped
     healthcheck:
-      # без curl: используем встроенный python для GET /health
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)",
-        ]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -91,6 +97,16 @@ services:
       DB_NAME: questbot
       DB_USER: questbot
       DB_PASSWORD: questbot
+
+      # Для бота тоже пробрасываем нужные переменные (если читаются им)
+      APP_SECRET: ${APP_SECRET}
+      ADMIN_SECRET: ${ADMIN_SECRET}
+      BOT_TOKEN: ${BOT_TOKEN}
+      REDIS_HOST: redis
+      STRICT_WHITELIST: ${STRICT_WHITELIST}
+      WHITELIST_PATH: ${WHITELIST_PATH}
+      COORDINATOR_CONTACT: ${COORDINATOR_CONTACT}
+
     depends_on:
       app:
         condition: service_healthy
@@ -102,13 +118,7 @@ services:
       - .:/code
     restart: unless-stopped
     healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://app:8000/health', timeout=2)",
-        ]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://app:8000/health', timeout=2)"]
       interval: 15s
       timeout: 5s
       retries: 10
