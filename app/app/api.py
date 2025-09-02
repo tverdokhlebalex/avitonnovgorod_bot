@@ -503,6 +503,11 @@ def game_current(tg_id: str = Query(...), db: Session = Depends(get_db)):
         raise HTTPException(409, "User has no team")
 
     team = db.get(models.Team, member.team_id)
+
+    # ✅ если финиш — сразу говорим об этом
+    if getattr(team, "finished_at", None):
+        return {"finished": True, "checkpoint": None}
+
     _require_team_started(team)
 
     cp = _current_checkpoint(db, team)
@@ -521,7 +526,6 @@ def game_current(tg_id: str = Query(...), db: Session = Depends(get_db)):
             "total": total,
         },
     }
-
 
 # ---------- GAME: QR отключён (только фото) ----------
 @router.post("/game/scan", response_model=GameScanOut, dependencies=[Depends(require_secret)])
@@ -917,16 +921,16 @@ def admin_approve(proof_id: int = Path(..., ge=1), db: Session = Depends(get_db)
     db.commit()
 
     team = db.get(models.Team, proof.team_id)
-    # если это последняя точка — финишируем; иначе двигаем линейку
+
     if _is_last_checkpoint(db, team):
         if not getattr(team, "finished_at", None):
             team.finished_at = now_utc()
+            # НЕ трогаем team.current_order_num — колонка NOT NULL
             db.commit()
     else:
         _advance_team_to_next_checkpoint(db, team)
 
     return {"ok": True, "progress": _progress_tuple(db, team)}
-
 
 @admin.post("/proofs/{proof_id}/reject", response_model=dict)
 def admin_reject(proof_id: int = Path(..., ge=1), db: Session = Depends(get_db)):
