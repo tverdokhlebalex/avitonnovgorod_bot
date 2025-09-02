@@ -3,7 +3,7 @@ from aiogram import Router, F
 from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 from ..states import RegStates, CaptainStates
-from ..keyboards import kb_request_phone, kb_main, ib_leaderboard
+from ..keyboards import kb_request_phone, kb_user_main, ib_leaderboard
 from ..api_client import register_user, roster_by_tg
 from ..utils import norm_phone, KNOWN, load_participants, format_roster, only_first_name
 from ..config import STRICT_WHITELIST, TEAM_SIZE
@@ -48,6 +48,7 @@ async def reg_name(m: Message, state: FSMContext):
         return await m.answer("Имя слишком короткое. Минимум 2 символа.")
     data = await state.get_data()
     phone = data.get("phone","")
+
     if STRICT_WHITELIST:
         load_participants()
         if phone not in KNOWN:
@@ -58,36 +59,35 @@ async def reg_name(m: Message, state: FSMContext):
         logging.error("register_user failed: %s %s", st, payload)
         await state.clear()
         return await m.answer("Сервис регистрации временно недоступен.")
-
     await state.clear()
 
-    # Покажем состав + кнопки
+    # Показать состав + кнопки
     _, roster = await roster_by_tg(m.from_user.id)
     if not roster:
-        return await m.answer("Регистрация выполнена. /team — состав команды.", reply_markup=kb_main())
+        return await m.answer("Регистрация выполнена. /team — состав команды.")
 
-    await m.answer(format_roster(roster), parse_mode="Markdown", reply_markup=kb_main())
-    # инлайн-кнопка на WebApp
-    await m.answer("Открой мини-приложение с лидербордом:", reply_markup=ib_leaderboard())
+    await m.answer(format_roster(roster), parse_mode="Markdown", reply_markup=kb_user_main())
+    await m.answer(".", reply_markup=ib_leaderboard(m.from_user.id))  # без лишнего текста
 
     members_count = len(roster.get("members") or [])
     cap = roster.get("captain")
 
-    # Сообщим всем, кто видит чат текущего пользователя
+    # Сообщение о назначении капитана — всем
     if cap:
         await m.answer(CAPTAIN_ASSIGNED.format(captain=only_first_name(cap)), parse_mode="Markdown")
 
-    # Если пользователь — капитан и команда полная → ждём название
+    # Если тек. пользователь — капитан и команда полная → просим имя
     if cap and str(cap.get("tg_id")) == str(m.from_user.id) and members_count >= TEAM_SIZE:
         await m.answer("Команда выглядит полной. Придумайте название:", parse_mode="Markdown")
         return await state.set_state(CaptainStates.waiting_team_name)
 
-    # Если капитан — другой пользователь и команда только что стала полной → пуш капитану
+    # Если капитан другой и команда только что стала полной → пинганём капитана
     if cap and members_count >= TEAM_SIZE and str(cap.get("tg_id")) != str(m.from_user.id):
         try:
             await m.bot.send_message(
-                chat_id=int(cap["tg_id"]),
-                text="Команда выглядит полной. Придумайте название:",
+                int(cap["tg_id"]),
+                "Команда выглядит полной. Придумайте название:",
+                parse_mode="Markdown"
             )
         except Exception:
-            logging.exception("Failed to push rename prompt to captain")
+            logging.exception("Не удалось написать капитану про нейминг")

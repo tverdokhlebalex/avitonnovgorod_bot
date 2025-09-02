@@ -14,12 +14,21 @@ STRICT_WHITELIST = os.getenv("STRICT_WHITELIST", "true").lower() in ("1","true",
 PARTICIPANTS_CSV = os.getenv("PARTICIPANTS_CSV", "/code/data/participants.csv")
 PARTICIPANTS_CSV_FALLBACK = "/code/data/participants_template.csv"
 
-# WebApp (для инлайн-кнопки)
-WEBAPP_URL = (os.getenv("WEBAPP_URL") or f"{API_BASE}/webapp").strip()
-
 CLIENT_TIMEOUT = aiohttp.ClientTimeout(total=20, connect=5, sock_connect=5, sock_read=15)
-HTTP: aiohttp.ClientSession | None = None
 
+# WebApp
+WEBAPP_URL = (os.getenv("WEBAPP_URL") or f"{API_BASE}/webapp").strip()
+def build_webapp_url(tg_id: int | str) -> str:
+    url = WEBAPP_URL
+    low = url.lower()
+    # dev-режим для http/localhost
+    if low.startswith("http://") or "localhost" in low or "127.0.0.1" in low:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}dev_tg={tg_id}"
+    return url
+
+# HTTP session
+HTTP: aiohttp.ClientSession | None = None
 async def get_http() -> aiohttp.ClientSession:
     global HTTP
     if HTTP is None or HTTP.closed:
