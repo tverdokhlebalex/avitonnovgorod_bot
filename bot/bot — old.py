@@ -22,14 +22,6 @@ from aiogram.types import (
 )
 from aiogram.types.error_event import ErrorEvent
 
-async def main():
-    logging.info("Starting aiogram polling...")
-    bot = Bot(BOT_TOKEN, parse_mode="Markdown")
-    # ВАЖНО: вырубаем webhook и чистим очередь, чтобы точно получать апдейты по polling
-    await bot.delete_webhook(drop_pending_updates=True)
-
-    dp = Dispatcher(storage=MemoryStorage())
-    ...
 # --------------------
 # Конфиг и логирование
 # --------------------

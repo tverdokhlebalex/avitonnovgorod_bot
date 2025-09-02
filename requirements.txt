@@ -11,3 +11,4 @@ aiogram==3.4.1
 PyJWT==2.8.0
 itsdangerous==2.2.0
 psycopg[binary]
+aiohttp>=3.9.0

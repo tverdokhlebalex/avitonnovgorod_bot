@@ -1,9 +1,11 @@
+# app/app/models/__init__.py
 from sqlalchemy import (
-    Column, Integer, String, Boolean, DateTime, ForeignKey, Text, Float,
+    Column, Integer, BigInteger, String, Boolean, DateTime, ForeignKey, Text, Float,
     UniqueConstraint, Index, func,
 )
 from sqlalchemy.orm import relationship
-from app.database import Base
+from ..database import Base
+
 
 
 # ========= common =========
@@ -18,7 +20,49 @@ class TimestampMixin:
     )
 
 
-# ========= core entities =========
+# ========= new route/checkpoint/proof model =========
+
+class Route(Base, TimestampMixin):
+    __tablename__ = "routes"
+    __table_args__ = (
+        UniqueConstraint("code", name="uq_route_code"),
+        Index("ix_routes_active", "is_active"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    code = Column(String(1), nullable=False, index=True)  # 'A'|'B'|'C'
+    name = Column(String(64), nullable=False)
+    is_active = Column(Boolean, nullable=False, server_default="1")
+
+    # relations
+    checkpoints = relationship("Checkpoint", back_populates="route", cascade="all, delete-orphan")
+    teams = relationship("Team", back_populates="route")
+
+    def __repr__(self) -> str:
+        return f"<Route id={self.id} code={self.code!r} name={self.name!r} active={self.is_active}>"
+
+
+class Checkpoint(Base, TimestampMixin):
+    __tablename__ = "checkpoints"
+    __table_args__ = (
+        UniqueConstraint("route_id", "order_num", name="uq_checkpoint_route_order"),
+        Index("ix_checkpoint_route_order", "route_id", "order_num"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    route_id = Column(Integer, ForeignKey("routes.id", ondelete="CASCADE"), nullable=False, index=True)
+    order_num = Column(Integer, nullable=False)  # 1..N внутри маршрута
+    title = Column(String(128), nullable=False)
+    riddle = Column(Text, nullable=False)
+    photo_hint = Column(Text, nullable=True)
+
+    # relations
+    route = relationship("Route", back_populates="checkpoints")
+    proofs = relationship("Proof", back_populates="checkpoint", cascade="all, delete-orphan")
+
+    def __repr__(self) -> str:
+        return f"<Checkpoint id={self.id} route_id={self.route_id} order={self.order_num} title={self.title!r}>"
+
 
 class Team(Base, TimestampMixin):
     __tablename__ = "teams"
@@ -34,8 +78,10 @@ class Team(Base, TimestampMixin):
     # Устарело (браслеты отменили) — оставляем колонку, чтобы не мигрировать лишний раз
     color = Column(String(32), nullable=True, index=True)  # DEPRECATED
 
-    # На будущее: линейные сценарии/маршруты (опционально)
-    route_id = Column(Integer, nullable=True, index=True)
+    # Линейный маршрут (теперь полноценная связь)
+    route_id = Column(Integer, ForeignKey("routes.id", ondelete="SET NULL"), nullable=True, index=True)
+    # Текущий порядковый номер точки (линейка)
+    current_order_num = Column(Integer, nullable=False, server_default="1")
 
     # Капитан может один раз задать название (после формирования команды)
     can_rename = Column(Boolean, nullable=False, server_default="1")
@@ -44,14 +90,16 @@ class Team(Base, TimestampMixin):
     started_at = Column(DateTime, nullable=True, index=True)
     finished_at = Column(DateTime, nullable=True, index=True)
 
-    # Связи
+    # relations
     members = relationship("TeamMember", back_populates="team", cascade="all, delete-orphan")
     progress = relationship("TeamTaskProgress", back_populates="team", cascade="all, delete-orphan")
+    proofs = relationship("Proof", back_populates="team", cascade="all, delete-orphan")
+    route = relationship("Route", back_populates="teams")
 
     def __repr__(self) -> str:
         return (
             f"<Team id={self.id} name={self.name!r} locked={self.is_locked} "
-            f"route={self.route_id} can_rename={self.can_rename} "
+            f"route={self.route_id} current={self.current_order_num} can_rename={self.can_rename} "
             f"started_at={self.started_at} finished_at={self.finished_at}>"
         )
 
@@ -66,9 +114,10 @@ class User(Base, TimestampMixin):
     last_name = Column(String(255), nullable=True)
     is_active = Column(Boolean, nullable=False, server_default="1")
 
-    # Связи
+    # relations
     teams = relationship("TeamMember", back_populates="user", cascade="all, delete-orphan")
     submissions = relationship("TeamTaskProgress", back_populates="submitted_by", cascade="all, delete-orphan")
+    proofs_submitted = relationship("Proof", back_populates="submitted_by_user", cascade="all, delete-orphan")
 
     __table_args__ = (
         # Оставляем для совместимости: уникальность по телефону + ФИО
@@ -95,7 +144,7 @@ class TeamMember(Base, TimestampMixin):
         return f"<TeamMember team_id={self.team_id} user_id={self.user_id} role={self.role!r}>"
 
 
-# ========= tasks =========
+# ========= legacy tasks (оставлены для совместимости/админки) =========
 
 class Task(Base, TimestampMixin):
     __tablename__ = "tasks"
@@ -112,7 +161,7 @@ class Task(Base, TimestampMixin):
     points = Column(Integer, nullable=False, server_default="1")
     is_active = Column(Boolean, nullable=False, server_default="1")
 
-    # NEW: координаты точки задания (для ссылки на Яндекс.Карты в mini app)
+    # координаты точки задания (для ссылки на Яндекс.Карты в mini app)
     lat = Column(Float, nullable=True)
     lon = Column(Float, nullable=True)
 
@@ -123,7 +172,7 @@ class Task(Base, TimestampMixin):
         )
 
 
-# ========= progress (QR / PHOTO + модерация) =========
+# ========= legacy progress (QR / PHOTO + модерация) =========
 
 class TeamTaskProgress(Base, TimestampMixin):
     """
@@ -160,4 +209,45 @@ class TeamTaskProgress(Base, TimestampMixin):
         )
 
 
-__all__ = ["Team", "User", "TeamMember", "Task", "TeamTaskProgress"]
+# ========= new proof flow (фото как единственный ответ) =========
+
+class Proof(Base, TimestampMixin):
+    __tablename__ = "proofs"
+    __table_args__ = (
+        UniqueConstraint("team_id", "checkpoint_id", name="uq_proof_team_checkpoint"),
+        Index("ix_proof_team", "team_id"),
+        Index("ix_proof_status", "status"),
+        Index("ix_proof_checkpoint", "checkpoint_id"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    team_id = Column(Integer, ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
+    route_id = Column(Integer, ForeignKey("routes.id", ondelete="CASCADE"), nullable=False)
+    checkpoint_id = Column(Integer, ForeignKey("checkpoints.id", ondelete="CASCADE"), nullable=False)
+
+    photo_file_id = Column(String(256), nullable=False)  # Telegram file_id или локальный путь
+    status = Column(String(16), nullable=False, server_default="PENDING")  # PENDING|APPROVED|REJECTED
+
+    submitted_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    judged_by = Column(BigInteger, nullable=True)  # tg admin id (можно 0)
+    judged_at = Column(DateTime, nullable=True)
+    comment = Column(Text, nullable=True)
+
+    # relations
+    team = relationship("Team", back_populates="proofs")
+    route = relationship("Route")
+    checkpoint = relationship("Checkpoint", back_populates="proofs")
+    submitted_by_user = relationship("User", back_populates="proofs_submitted")
+
+    def __repr__(self) -> str:
+        return (
+            f"<Proof id={self.id} team_id={self.team_id} cp_id={self.checkpoint_id} "
+            f"status={self.status!r}>"
+        )
+
+
+__all__ = [
+    "Route", "Checkpoint", "Proof",
+    "Team", "User", "TeamMember",
+    "Task", "TeamTaskProgress",
+]

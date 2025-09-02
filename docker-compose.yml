@@ -87,7 +87,7 @@ services:
       args:
         PIP_INDEX_URL: https://mirror.yandex.ru/mirrors/pypi/simple
     working_dir: /code
-    command: python /code/bot/bot.py
+    command: python -u -m bot.main
     env_file:
       - .env
     environment:

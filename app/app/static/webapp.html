@@ -87,6 +87,7 @@
       a {
         color: var(--acc);
         text-decoration: none;
+        word-break: break-all;
       }
       .table {
         width: 100%;
@@ -143,10 +144,34 @@
             ><span id="team-finished" class="mono muted">—</span>
           </div>
         </div>
+
         <div class="card">
           <button id="btn-start" class="btn">Начать квест</button>
           <p class="muted" style="margin-top: 8px">
             Кнопка доступна только капитану, один раз на команду.
+          </p>
+        </div>
+
+        <!-- NEW: Контакты координатора -->
+        <div class="card" id="coord-card">
+          <h3 class="title">Контакты координатора</h3>
+          <div class="kv">
+            <span>Telegram</span>
+            <a
+              id="coord-tg"
+              class="mono"
+              href="#"
+              target="_blank"
+              rel="noopener"
+              >—</a
+            >
+          </div>
+          <div class="kv">
+            <span>Телефон</span>
+            <a id="coord-phone" class="mono" href="#">—</a>
+          </div>
+          <p class="muted">
+            Пишите по вопросам модерации фото и организационным моментам.
           </p>
         </div>
       </section>
@@ -211,12 +236,10 @@
         );
 
         // Utils
-        const isFiniteNum = (v) => typeof v === "number" && Number.isFinite(v);
         const toNum = (v) => {
           const n = Number(v);
           return Number.isFinite(n) ? n : null;
         };
-
         function fmtTime(iso) {
           if (!iso) return "—";
           const d = new Date(iso);
@@ -248,18 +271,17 @@
 
         function renderTeam(s) {
           const t = s.team || {};
-          // надёжный счётчик: team.solved/total, если нет — score.done/total
           let solved = toNum(t.solved);
           let total = toNum(t.total);
           if (solved === null || total === null) {
             solved = solved ?? toNum(s?.score?.done);
             total = total ?? toNum(s?.score?.total);
           }
-          const solvedText = `${solved ?? "—"}/${total ?? "—"}`;
-
           document.getElementById("team-name").children[0].innerText =
             t.team_name ?? "—";
-          document.getElementById("team-solved").innerText = solvedText;
+          document.getElementById("team-solved").innerText = `${
+            solved ?? "—"
+          }/${total ?? "—"}`;
           document.getElementById("team-started").innerText = fmtTime(
             t.started_at
           );
@@ -277,6 +299,28 @@
           document.getElementById("btn-start").disabled = !(
             s.is_captain && !t.started_at
           );
+
+          // NEW: контакты
+          const ct = s?.coordinator?.tg || s?.coordinator?.contact || "";
+          const cp = s?.coordinator?.phone || "";
+          const tgA = document.getElementById("coord-tg");
+          const phA = document.getElementById("coord-phone");
+
+          if (ct) {
+            tgA.href = ct;
+            tgA.textContent = ct;
+          } else {
+            tgA.removeAttribute("href");
+            tgA.textContent = "—";
+          }
+
+          if (cp) {
+            phA.href = `tel:${cp}`;
+            phA.textContent = cp;
+          } else {
+            phA.removeAttribute("href");
+            phA.textContent = "—";
+          }
         }
 
         function renderTask(s) {
@@ -341,13 +385,13 @@
             const name = document.createElement("td");
             name.textContent = r.team_name ?? "—";
             const solved = document.createElement("td");
-            solved.textContent = `${toNum(r.solved) ?? 0}/${
-              toNum(r.total) ?? 0
-            }`;
+            solved.textContent = `${
+              toNum(r.tasks_done) ?? toNum(r.solved) ?? 0
+            }/${toNum(r.total_tasks) ?? toNum(r.total) ?? 0}`;
             const time = document.createElement("td");
 
             if (r.finished_at) {
-              time.textContent = fmtDur(r.duration_sec);
+              time.textContent = fmtDur(r.elapsed_seconds ?? r.duration_sec);
             } else if (r.started_at) {
               const startSec = Math.floor(
                 new Date(r.started_at).getTime() / 1000
@@ -418,7 +462,7 @@
                     map_url: data.map_url,
                   })
                 );
-              } catch (e) {}
+              } catch {}
             }
             await refresh();
             tg?.showAlert("Квест начат! Удачи!");
@@ -436,7 +480,7 @@
                 message: "Ссылка на карту в буфере обмена",
                 buttons: [{ type: "close" }],
               });
-            } catch (e) {
+            } catch {
               tg?.showAlert("Не удалось скопировать");
             }
           });

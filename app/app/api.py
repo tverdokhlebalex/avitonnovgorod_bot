@@ -7,7 +7,7 @@ import hmac
 import json
 import hashlib
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional, List, Dict, Any
 
 from fastapi import (
@@ -23,7 +23,7 @@ from .schemas import (
     RegisterIn, RegisterOut, ImportReport, TeamOut, TeamRosterOut,
     # team structs / admin
     TeamMemberInfo, TeamAdminOut, SetCaptainIn, MoveMemberIn, AdminTeamUpdateIn,
-    # tasks / game
+    # tasks / game (совместимость со старым API)
     TaskOut, TaskCreateIn, TaskUpdateIn, GameScanIn, GameScanOut,
     # rename
     TeamRenameIn, TeamRenameOut,
@@ -39,7 +39,7 @@ TEAM_SIZE = int(os.getenv("TEAM_SIZE", 7))
 PROOFS_DIR = os.getenv("PROOFS_DIR", "/code/data/proofs")
 os.makedirs(PROOFS_DIR, exist_ok=True)
 
-# Токен бота нужен ДЛЯ ПРОВЕРКИ WebApp init_data (подписи)
+# Токен бота (используется только для WebApp-подписей в старых интеграциях)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
 
@@ -51,6 +51,7 @@ def require_secret(x_app_secret: str | None = Header(default=None, alias="x-app-
 
 # --- helpers ---
 def now_utc() -> datetime:
+    # проект везде использует naive UTC (без tzinfo)
     return datetime.utcnow()
 
 
@@ -159,226 +160,53 @@ def _require_team_started(team: models.Team):
         raise HTTPException(409, "Team has not started yet")
 
 
-def _total_active_tasks(db: Session) -> int:
-    return db.query(func.count(models.Task.id)).filter(models.Task.is_active == True).scalar() or 0  # noqa: E712
+# ---- Маршруты / чекпойнты / доказательства ---------------------------------
 
-
-def _approved_count(db: Session, team_id: int) -> int:
+def _route_total_checkpoints(db: Session, route_id: int | None) -> int:
+    if not route_id:
+        return 0
     return (
-        db.query(func.count(models.TeamTaskProgress.id))
-        .filter(
-            models.TeamTaskProgress.team_id == team_id,
-            models.TeamTaskProgress.status == "APPROVED",
-        )
+        db.query(func.count(models.Checkpoint.id))
+        .filter(models.Checkpoint.route_id == route_id)
         .scalar()
     ) or 0
 
 
-def _maybe_finish_team(db: Session, team: models.Team):
-    total = _total_active_tasks(db)
-    done = _approved_count(db, team.id)
-    if total > 0 and done >= total and not getattr(team, "finished_at", None):
-        team.finished_at = now_utc()
-        db.commit()
+def _approved_count_cp(db: Session, team_id: int) -> int:
+    return (
+        db.query(func.count(models.Proof.id))
+        .filter(models.Proof.team_id == team_id, models.Proof.status == "APPROVED")
+        .scalar()
+    ) or 0
 
 
-# =============================================================================
-#                               WEBAPP (NO SECRET)
-# =============================================================================
-webapp = APIRouter(prefix="/webapp", tags=["webapp"])  # будет подключён к /api без require_secret
-
-
-def _verify_webapp_init_data(init_data: str) -> Dict[str, Any]:
-    """
-    Верификация подписи Telegram WebApp initData.
-    Док: https://core.telegram.org/bots/webapps#validating-data-received-via-the-web-app
-    """
-    if not BOT_TOKEN:
-        # Без BOT_TOKEN нельзя проверить подпись — лучше явно 500, чтобы не путать с 401 по секрету.
-        raise HTTPException(500, "BOT_TOKEN is not configured on backend")
-
-    pairs = urllib.parse.parse_qsl(init_data, keep_blank_values=True)
-    data: Dict[str, str] = {k: v for k, v in pairs}
-    recv_hash = data.pop("hash", None)
-    if not recv_hash:
-        raise HTTPException(401, "Missing hash")
-
-    # 1) derive secret key
-    secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode("utf-8"), hashlib.sha256).digest()
-    # 2) build data_check_string over all fields except 'hash'
-    data_check_string = "\n".join(f"{k}={data[k]}" for k in sorted(data.keys()))
-    # 3) calc hmac
-    calc_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
-    if calc_hash != recv_hash:
-        raise HTTPException(401, "Bad webapp signature")
-
-    out: Dict[str, Any] = {}
-    out["auth_date"] = int(data.get("auth_date", "0") or 0)
-    # user — JSON-строка в init_data, уже раскодированная parse_qsl
-    try:
-        out["user"] = json.loads(data.get("user", "{}") or "{}")
-    except json.JSONDecodeError:
-        out["user"] = {}
-    # остальное по требованию.
-    out["raw"] = data
-    return out
-
-
-@webapp.get("/health")
-def webapp_health() -> Dict[str, str]:
-    return {"ok": "webapp alive"}
-
-
-@webapp.get("/summary")
-def webapp_summary(
-    init_data: str = Query(..., description="Telegram WebApp initData"),
-    db: Session = Depends(get_db),
-):
-    # 1) verify
-    parsed = _verify_webapp_init_data(init_data)
-    tg_user = parsed.get("user") or {}
-    tg_id = str(tg_user.get("id") or "")
-
-    # 2) user & membership
-    user = db.query(models.User).filter(models.User.tg_id == tg_id).one_or_none()
-    if not user:
-        # Возвращаем 200 с флагом, чтобы фронт мог показать «не зарегистрирован»
-        return {
-            "registered": False,
-            "user": {"tg_id": tg_id, "first_name": tg_user.get("first_name"), "last_name": tg_user.get("last_name")},
-        }
-
-    member = db.query(models.TeamMember).filter(models.TeamMember.user_id == user.id).one_or_none()
-    team = db.get(models.Team, member.team_id) if member else None
-
-    # 3) participants / roster
-    captain_row = (
-        db.query(models.TeamMember, models.User)
-        .join(models.User, models.User.id == models.TeamMember.user_id)
-        .filter(models.TeamMember.team_id == (team.id if team else -1), models.TeamMember.role == "CAPTAIN")
+def _current_checkpoint(db: Session, team: models.Team) -> models.Checkpoint | None:
+    if not getattr(team, "route_id", None) or not getattr(team, "current_order_num", None):
+        return None
+    return (
+        db.query(models.Checkpoint)
+        .filter(
+            models.Checkpoint.route_id == team.route_id,
+            models.Checkpoint.order_num == team.current_order_num,
+        )
         .one_or_none()
-        if team else None
-    )
-    captain = None
-    if captain_row:
-        m, u = captain_row
-        captain = {
-            "user_id": u.id,
-            "role": m.role,
-            "first_name": u.first_name,
-            "last_name": u.last_name,
-            "phone": u.phone,
-            "tg_id": u.tg_id,
-        }
-
-    members = []
-    if team:
-        rows = (
-            db.query(models.TeamMember, models.User)
-            .join(models.User, models.User.id == models.TeamMember.user_id)
-            .filter(models.TeamMember.team_id == team.id)
-            .order_by(models.TeamMember.id.asc())
-            .all()
-        )
-        for m, u in rows:
-            members.append({
-                "user_id": u.id,
-                "role": m.role,
-                "first_name": u.first_name,
-                "last_name": u.last_name,
-                "phone": u.phone,
-                "tg_id": u.tg_id,
-            })
-
-    # 4) tasks + progress
-    tasks = (
-        db.query(models.Task)
-        .order_by(func.coalesce(models.Task.order, 10**9), models.Task.id.asc())
-        .all()
     )
 
-    progress_map: Dict[int, models.TeamTaskProgress] = {}
-    if team:
-        prows = (
-            db.query(models.TeamTaskProgress)
-            .filter(models.TeamTaskProgress.team_id == team.id)
-            .all()
-        )
-        for p in prows:
-            progress_map[p.task_id] = p
 
-    tasks_out = []
-    points_total = 0
-    total_active = 0
-    done_count = 0
-    for t in tasks:
-        st = None
-        completed_at = None
-        if t.id in progress_map:
-            st = progress_map[t.id].status
-            completed_at = (
-                progress_map[t.id].completed_at.isoformat()
-                if getattr(progress_map[t.id], "completed_at", None)
-                else None
-            )
-        # статистика
-        if t.is_active:
-            total_active += 1
-            if st == "APPROVED":
-                done_count += 1
-                points_total += int(t.points or 0)
-        tasks_out.append({
-            "id": t.id,
-            "code": t.code,
-            "title": t.title,
-            "points": int(t.points or 0),
-            "is_active": bool(t.is_active),
-            "status": st or "NONE",
-            "completed_at": completed_at,
-        })
-
-    team_block = None
-    if team:
-        team_block = {
-            "team_id": team.id,
-            "team_name": team.name,
-            "is_locked": bool(team.is_locked),
-            "can_rename": bool(getattr(team, "can_rename", True)),
-            "is_captain": (member.role or "").upper() == "CAPTAIN" if member else False,
-            "started_at": team.started_at.isoformat() if getattr(team, "started_at", None) else None,
-            "finished_at": team.finished_at.isoformat() if getattr(team, "finished_at", None) else None,
-            "color": getattr(team, "color", None),
-            "route_id": getattr(team, "route_id", None),
-        }
-
-    return {
-        "registered": True,
-        "user": {
-            "id": user.id,
-            "tg_id": user.tg_id,
-            "first_name": user.first_name,
-            "last_name": user.last_name,
-            "phone": user.phone,
-        },
-        "team": team_block,
-        "roster": {
-            "captain": captain,
-            "members": members,
-            "size": len(members),
-            "team_size": TEAM_SIZE,
-        } if team else None,
-        "tasks": tasks_out,
-        "score": {
-            "done": done_count,
-            "total": total_active,
-            "points": points_total,
-        },
-    }
+def _is_last_checkpoint(db: Session, team: models.Team) -> bool:
+    total = _route_total_checkpoints(db, getattr(team, "route_id", None))
+    return bool(total and int(getattr(team, "current_order_num", 0)) >= total)
 
 
-# -----------------------------------------------------------------------------
+def _advance_team_to_next_checkpoint(db: Session, team: models.Team) -> None:
+    team.current_order_num = int(team.current_order_num or 1) + 1
+    db.commit()
+
+
+# =============================================================================
 #                         PUBLIC (requires x-app-secret)
-# -----------------------------------------------------------------------------
+# =============================================================================
+
 @router.post("/users/register", response_model=RegisterOut, dependencies=[Depends(require_secret)])
 def register_or_assign(payload: RegisterIn, db: Session = Depends(get_db)):
     phone = norm_phone(payload.phone)
@@ -600,93 +428,68 @@ def game_start(
     if not _team_is_full(db, team.id):
         raise HTTPException(409, "Team is not full yet")
 
+    if not getattr(team, "route_id", None):
+        raise HTTPException(409, "Route is not assigned for this team")
+
     is_default = bool(re.match(r"^Команда №\d+$", team.name or ""))
     if is_default and getattr(team, "can_rename", True):
         raise HTTPException(409, "Set custom team name first")
 
     team.started_at = now_utc()
+    if not getattr(team, "current_order_num", None):
+        team.current_order_num = 1
     db.commit()
     return {"ok": True, "message": "Started", "team_id": team.id, "team_name": team.name, "started_at": team.started_at.isoformat()}
 
 
-# ---------- GAME: скан QR ----------
-@router.post("/game/scan", response_model=GameScanOut, dependencies=[Depends(require_secret)])
-def game_scan(payload: GameScanIn, db: Session = Depends(get_db)):
-    user = db.query(models.User).filter(models.User.tg_id == payload.tg_id).one_or_none()
+# ---------- GAME: текущая точка (бот / интеграции) ----------
+@router.get("/game/current", response_model=dict, dependencies=[Depends(require_secret)])
+def game_current(tg_id: str = Query(...), db: Session = Depends(get_db)):
+    user = db.query(models.User).filter_by(tg_id=tg_id).one_or_none()
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    member = db.query(models.TeamMember).filter(models.TeamMember.user_id == user.id).one_or_none()
+        raise HTTPException(404, "User not found")
+    member = db.query(models.TeamMember).filter_by(user_id=user.id).one_or_none()
     if not member:
-        raise HTTPException(status_code=409, detail="User has no team membership")
-
-    if (member.role or "").upper() != "CAPTAIN":
-        raise HTTPException(status_code=403, detail="Only captain can submit")
+        raise HTTPException(409, "User has no team")
 
     team = db.get(models.Team, member.team_id)
     _require_team_started(team)
 
-    task = (
-        db.query(models.Task)
-        .filter(models.Task.code == payload.code, models.Task.is_active == True)
-        .one_or_none()
-    )
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    cp = _current_checkpoint(db, team)
+    if not cp:
+        return {"finished": True, "checkpoint": None}
 
-    prog = (
-        db.query(models.TeamTaskProgress)
-        .filter_by(team_id=team.id, task_id=task.id)
-        .one_or_none()
-    )
-    already = bool(prog and prog.status == "APPROVED")
-
-    if not prog:
-        prog = models.TeamTaskProgress(team_id=team.id, task_id=task.id)
-        db.add(prog)
-
-    prog.status = "APPROVED"
-    prog.proof_type = "QR"
-    prog.proof_url = None
-    prog.submitted_by_user_id = user.id
-    prog.completed_at = now_utc()
-    db.commit()
-
-    _maybe_finish_team(db, team)
-
-    total = (
-        db.query(func.coalesce(func.sum(models.Task.points), 0))
-        .select_from(models.TeamTaskProgress)
-        .join(models.Task, models.Task.id == models.TeamTaskProgress.task_id)
-        .filter(models.TeamTaskProgress.team_id == team.id, models.TeamTaskProgress.status == "APPROVED")
-        .scalar()
-    ) or 0
-
-    return GameScanOut(
-        ok=True,
-        message="OK" if not already else "Already solved",
-        already_solved=already,
-        team_id=team.id,
-        team_name=team.name,
-        task_id=task.id,
-        task_title=task.title,
-        points_earned=int(task.points) if not already else 0,
-        team_total_points=int(total),
-    )
+    total = _route_total_checkpoints(db, team.route_id)
+    return {
+        "finished": False,
+        "checkpoint": {
+            "id": cp.id,
+            "order_num": cp.order_num,
+            "title": cp.title,
+            "riddle": cp.riddle,
+            "photo_hint": getattr(cp, "photo_hint", None),
+            "total": total,
+        },
+    }
 
 
-# Фото: JSON-вариант — PENDING
+# ---------- GAME: QR отключён (только фото) ----------
+@router.post("/game/scan", response_model=GameScanOut, dependencies=[Depends(require_secret)])
+def game_scan(_: GameScanIn, __: Session = Depends(get_db)):
+    raise HTTPException(status_code=410, detail="QR flow disabled: answers are photos only")
+
+
+# ---------- Фото: JSON — Proof(PENDING) на текущую точку ----------
 @router.post("/game/photo", response_model=dict, dependencies=[Depends(require_secret)])
 def submit_photo_json(
-    data: Dict[str, Any] = Body(..., example={"tg_id": "123", "task_code": "demo", "tg_file_id": "<file_id>"}),
+    data: Dict[str, Any] = Body(..., example={"tg_id": "123", "tg_file_id": "<file_id>"}),
     db: Session = Depends(get_db),
 ):
     tg_id = str(data.get("tg_id") or "")
-    task_code = str(data.get("task_code") or data.get("code") or "")
     tg_file_id = str(data.get("tg_file_id") or "")
 
-    if not (tg_id and task_code and tg_file_id):
-        raise HTTPException(400, "tg_id, task_code and tg_file_id are required")
+    if not (tg_id and tg_file_id):
+        raise HTTPException(400, "tg_id and tg_file_id are required")
 
     user = db.query(models.User).filter_by(tg_id=tg_id).one_or_none()
     if not user:
@@ -702,37 +505,38 @@ def submit_photo_json(
     team = db.get(models.Team, member.team_id)
     _require_team_started(team)
 
-    task = (
-        db.query(models.Task)
-        .filter(models.Task.code == task_code, models.Task.is_active == True)
-        .one_or_none()
-    )
-    if not task:
-        raise HTTPException(404, "Task not found")
+    cp = _current_checkpoint(db, team)
+    if not cp:
+        return {"ok": False, "message": "Route already finished"}
 
-    prog = (
-        db.query(models.TeamTaskProgress)
-        .filter_by(team_id=member.team_id, task_id=task.id)
-        .one_or_none()
-    )
-    if not prog:
-        prog = models.TeamTaskProgress(team_id=member.team_id, task_id=task.id)
-        db.add(prog)
+    # Если уже есть PENDING по текущей точке — не спамим
+    pending_exists = db.query(models.Proof).filter(
+        models.Proof.team_id == team.id,
+        models.Proof.checkpoint_id == cp.id,
+        models.Proof.status == "PENDING",
+    ).first()
+    if pending_exists:
+        return {"ok": True, "message": "Already queued for moderation", "proof_id": pending_exists.id}
 
-    prog.status = "PENDING"
-    prog.proof_type = "PHOTO"
-    prog.proof_url = tg_file_id
-    prog.submitted_by_user_id = user.id
+    proof = models.Proof(
+        team_id=team.id,
+        route_id=team.route_id,
+        checkpoint_id=cp.id,
+        photo_file_id=tg_file_id,         # Telegram file_id
+        status="PENDING",
+        submitted_by_user_id=user.id,
+    )
+    db.add(proof)
     db.commit()
+    db.refresh(proof)
 
-    return {"ok": True, "message": "Queued for moderation", "progress_id": prog.id}
+    return {"ok": True, "message": "Queued for moderation", "proof_id": proof.id}
 
 
-# Фото: multipart — PENDING
+# ---------- Фото: multipart — сохраняем файл локально и тоже Proof ----------
 @router.post("/game/submit-photo", response_model=dict, dependencies=[Depends(require_secret)])
 def submit_photo_file(
     tg_id: str = Form(...),
-    code: str = Form(...),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
@@ -750,37 +554,82 @@ def submit_photo_file(
     team = db.get(models.Team, member.team_id)
     _require_team_started(team)
 
-    task = (
-        db.query(models.Task)
-        .filter(models.Task.code == code, models.Task.is_active == True)
-        .one_or_none()
-    )
-    if not task:
-        raise HTTPException(404, "Task not found")
+    cp = _current_checkpoint(db, team)
+    if not cp:
+        return {"ok": False, "message": "Route already finished"}
 
     ts = int(now_utc().timestamp())
     safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", file.filename or f"proof_{ts}.jpg")
-    fname = f"team{member.team_id}_task{task.id}_{ts}_{safe_name}"
+    fname = f"team{team.id}_cp{cp.id}_{ts}_{safe_name}"
     path = os.path.join(PROOFS_DIR, fname)
     with open(path, "wb") as out:
         out.write(file.file.read())
 
-    prog = (
-        db.query(models.TeamTaskProgress)
-        .filter_by(team_id=member.team_id, task_id=task.id)
-        .one_or_none()
+    proof = models.Proof(
+        team_id=team.id,
+        route_id=team.route_id,
+        checkpoint_id=cp.id,
+        photo_file_id=path,               # локальный путь
+        status="PENDING",
+        submitted_by_user_id=user.id,
     )
-    if not prog:
-        prog = models.TeamTaskProgress(team_id=member.team_id, task_id=task.id)
-        db.add(prog)
-
-    prog.status = "PENDING"
-    prog.proof_type = "PHOTO"
-    prog.proof_url = path
-    prog.submitted_by_user_id = user.id
+    db.add(proof)
     db.commit()
+    db.refresh(proof)
 
-    return {"ok": True, "message": "Queued for moderation", "progress_id": prog.id, "file": fname}
+    return {"ok": True, "message": "Queued for moderation", "proof_id": proof.id, "file": fname}
+
+
+# ---------- ЛИДЕРБОРД по маршруту ----------
+@router.get("/leaderboard", response_model=list, dependencies=[Depends(require_secret)])
+def leaderboard(
+    route: Optional[str] = Query(None, description="Route code A|B|C (optional)"),
+    db: Session = Depends(get_db),
+):
+    route_row = None
+    if route:
+        route_row = db.query(models.Route).filter(models.Route.code == route.upper()).one_or_none()
+        if not route_row:
+            raise HTTPException(404, "Route not found")
+
+    teams_q = db.query(models.Team)
+    if route_row:
+        teams_q = teams_q.filter(models.Team.route_id == route_row.id)
+    teams = teams_q.order_by(models.Team.id.asc()).all()
+
+    def elapsed(t: models.Team) -> Optional[int]:
+        st = getattr(t, "started_at", None)
+        if not st:
+            return None
+        fin = getattr(t, "finished_at", None)
+        dt_end = fin or now_utc()
+        return int((dt_end - st).total_seconds())
+
+    rows = []
+    for t in teams:
+        total = _route_total_checkpoints(db, getattr(t, "route_id", None))
+        done = _approved_count_cp(db, t.id)
+        rows.append({
+            "team_id": t.id,
+            "team_name": t.name,
+            "tasks_done": int(done),
+            "total_tasks": int(total),
+            "started_at": getattr(t, "started_at", None).isoformat() if getattr(t, "started_at", None) else None,
+            "finished_at": getattr(t, "finished_at", None).isoformat() if getattr(t, "finished_at", None) else None,
+            "elapsed_seconds": elapsed(t),
+        })
+
+    def sort_key(r):
+        started = r["started_at"] is not None
+        finished = r["finished_at"] is not None
+        if finished:
+            return (0, r["elapsed_seconds"], 0)
+        if started:
+            return (1, -(r["tasks_done"]), r["team_id"])
+        return (2, r["team_id"])
+
+    rows.sort(key=sort_key)
+    return rows
 
 
 # ---------- ADMIN ----------
@@ -881,7 +730,7 @@ def admin_move_member(data: MoveMemberIn, db: Session = Depends(get_db)):
     return dump_team_admin(db, dest)
 
 
-# ---------- admin: tasks CRUD ----------
+# ---------- admin: tasks CRUD (совместимость со старым UI) ----------
 @admin.get("/tasks", response_model=List[TaskOut])
 def admin_tasks_list(db: Session = Depends(get_db)):
     items = (
@@ -963,159 +812,87 @@ def admin_tasks_delete(task_id: int = Path(..., ge=1), db: Session = Depends(get
 
 @admin.post("/tasks/reset-progress", response_model=dict)
 def admin_tasks_reset_progress(db: Session = Depends(get_db)):
+    # Старый прогресс больше не используется, но ручку оставляем no-op совместимой
     db.query(models.TeamTaskProgress).delete()
     db.commit()
     return {"ok": True}
 
 
-# ---------- ЛИДЕРБОРД ----------
-@router.get("/leaderboard", response_model=list, dependencies=[Depends(require_secret)])
-def leaderboard(db: Session = Depends(get_db)):
-    total_tasks = _total_active_tasks(db)
-    teams = db.query(models.Team).order_by(models.Team.id.asc()).all()
-
-    def elapsed(t: models.Team) -> Optional[int]:
-        st = getattr(t, "started_at", None)
-        if not st:
-            return None
-        fin = getattr(t, "finished_at", None)
-        dt_end = fin or now_utc()
-        return int((dt_end - st).total_seconds())
-
-    rows = []
-    for t in teams:
-        done = _approved_count(db, t.id)
-        rows.append({
-            "team_id": t.id,
-            "team_name": t.name,
-            "tasks_done": int(done),
-            "total_tasks": int(total_tasks),
-            "started_at": getattr(t, "started_at", None).isoformat() if getattr(t, "started_at", None) else None,
-            "finished_at": getattr(t, "finished_at", None).isoformat() if getattr(t, "finished_at", None) else None,
-            "elapsed_seconds": elapsed(t),
-        })
-
-    def sort_key(r):
-        started = r["started_at"] is not None
-        finished = r["finished_at"] is not None
-        if finished:
-            return (0, r["elapsed_seconds"], 0)
-        if started:
-            return (1, -(r["tasks_done"]), r["team_id"])
-        return (2, r["team_id"])
-
-    rows.sort(key=sort_key)
-    return rows
-
-
-# ---------- МОДЕРАЦИЯ ФОТО ----------
+# ---------- МОДЕРАЦИЯ ФОТО (Proof) ----------
 @admin.get("/proofs/pending", response_model=list)
 def admin_pending(db: Session = Depends(get_db)):
     q = (
-        db.query(models.TeamTaskProgress, models.Team, models.Task)
-        .join(models.Team, models.Team.id == models.TeamTaskProgress.team_id)
-        .join(models.Task, models.Task.id == models.TeamTaskProgress.task_id)
-        .filter(models.TeamTaskProgress.status == "PENDING")
-        .order_by(models.TeamTaskProgress.created_at.asc())
+        db.query(models.Proof, models.Team, models.Checkpoint, models.Route)
+        .join(models.Team, models.Team.id == models.Proof.team_id)
+        .join(models.Checkpoint, models.Checkpoint.id == models.Proof.checkpoint_id)
+        .join(models.Route, models.Route.id == models.Proof.route_id)
+        .filter(models.Proof.status == "PENDING")
+        .order_by(models.Proof.created_at.asc())
         .all()
     )
     out = []
-    for prog, team, task in q:
+    for proof, team, cp, route in q:
         out.append({
-            "id": prog.id,
+            "id": proof.id,
             "team_id": team.id,
             "team_name": team.name,
-            "task_id": task.id,
-            "task_title": task.title,
-            "proof_type": prog.proof_type,
-            "proof_url": prog.proof_url,
-            "submitted_by_user_id": prog.submitted_by_user_id,
-            "created_at": prog.created_at.isoformat() if prog.created_at else None,
+            "route": route.code,
+            "checkpoint_id": cp.id,
+            "order_num": cp.order_num,
+            "checkpoint_title": cp.title,
+            "photo_file_id": proof.photo_file_id,
+            "submitted_by_user_id": getattr(proof, "submitted_by_user_id", None),
+            "created_at": proof.created_at.isoformat() if getattr(proof, "created_at", None) else None,
         })
     return out
 
 
-def _recalc_score(db: Session, team_id: int) -> int:
-    total = (
-        db.query(func.coalesce(func.sum(models.Task.points), 0))
-        .select_from(models.TeamTaskProgress)
-        .join(models.Task, models.Task.id == models.TeamTaskProgress.task_id)
-        .filter(models.TeamTaskProgress.team_id == team_id, models.TeamTaskProgress.status == "APPROVED")
-        .scalar()
-    ) or 0
-    return int(total)
+def _progress_tuple(db: Session, team: models.Team) -> Dict[str, int]:
+    done = _approved_count_cp(db, team.id)
+    total = _route_total_checkpoints(db, team.route_id)
+    return {"done": int(done), "total": int(total)}
 
 
-@admin.post("/proofs/{progress_id}/approve", response_model=dict)
-def admin_approve(progress_id: int = Path(..., ge=1), db: Session = Depends(get_db)):
-    prog = db.get(models.TeamTaskProgress, progress_id)
-    if not prog:
-        raise HTTPException(404, "Progress not found")
-    prog.status = "APPROVED"
-    prog.completed_at = now_utc()
+@admin.post("/proofs/{proof_id}/approve", response_model=dict)
+def admin_approve(proof_id: int = Path(..., ge=1), db: Session = Depends(get_db)):
+    proof = db.get(models.Proof, proof_id)
+    if not proof:
+        raise HTTPException(404, "Proof not found")
+    if proof.status != "PENDING":
+        return {"ok": False, "message": "Already processed"}
+
+    proof.status = "APPROVED"
+    proof.judged_by = 0
+    proof.judged_at = now_utc()
     db.commit()
 
-    team = db.get(models.Team, prog.team_id)
-    _maybe_finish_team(db, team)
+    team = db.get(models.Team, proof.team_id)
+    # если это последняя точка — финишируем; иначе двигаем линейку
+    if _is_last_checkpoint(db, team):
+        if not getattr(team, "finished_at", None):
+            team.finished_at = now_utc()
+            db.commit()
+    else:
+        _advance_team_to_next_checkpoint(db, team)
 
-    return {"ok": True, "team_total_points": _recalc_score(db, prog.team_id)}
+    return {"ok": True, "progress": _progress_tuple(db, team)}
 
 
-@admin.post("/proofs/{progress_id}/reject", response_model=dict)
-def admin_reject(progress_id: int = Path(..., ge=1), db: Session = Depends(get_db)):
-    prog = db.get(models.TeamTaskProgress, progress_id)
-    if not prog:
-        raise HTTPException(404, "Progress not found")
-    prog.status = "REJECTED"
+@admin.post("/proofs/{proof_id}/reject", response_model=dict)
+def admin_reject(proof_id: int = Path(..., ge=1), db: Session = Depends(get_db)):
+    proof = db.get(models.Proof, proof_id)
+    if not proof:
+        raise HTTPException(404, "Proof not found")
+    if proof.status != "PENDING":
+        return {"ok": False, "message": "Already processed"}
+
+    proof.status = "REJECTED"
+    proof.judged_by = 0
+    proof.judged_at = now_utc()
     db.commit()
-    return {"ok": True}
+    team = db.get(models.Team, proof.team_id)
+    return {"ok": True, "progress": _progress_tuple(db, team)}
 
 
-@admin.patch("/teams/{team_id}", response_model=TeamAdminOut)
-def admin_update_team(
-    team_id: int = Path(..., ge=1),
-    data: AdminTeamUpdateIn | None = Body(None),
-    db: Session = Depends(get_db),
-):
-    team = db.get(models.Team, team_id)
-    if not team:
-        raise HTTPException(status_code=404, detail="Team not found")
-
-    if data is None:
-        data = AdminTeamUpdateIn()
-
-    if data.name is not None:
-        new_name = (data.name or "").strip()
-        if len(new_name) < 2:
-            raise HTTPException(400, "Name is too short")
-        exists = (
-            db.query(models.Team)
-            .filter(models.Team.name == new_name, models.Team.id != team.id)
-            .first()
-        )
-        if exists:
-            raise HTTPException(409, "Team name already exists")
-        team.name = new_name
-
-    if data.color is not None and hasattr(team, "color"):
-        team.color = (data.color or "").strip() or None
-
-    if data.route_id is not None and hasattr(team, "route_id"):
-        try:
-            team.route_id = int(data.route_id) if data.route_id is not None else None
-        except ValueError:
-            raise HTTPException(400, "route_id must be integer")
-
-    if data.is_locked is not None:
-        team.is_locked = bool(data.is_locked)
-
-    if data.can_rename is not None and hasattr(team, "can_rename"):
-        team.can_rename = bool(data.can_rename)
-
-    db.commit()
-    return dump_team_admin(db, team)
-
-
-# Подключаем webapp и admin к /api
-router.include_router(webapp)
+# Подключаем ТОЛЬКО админский саброутер
 router.include_router(admin)

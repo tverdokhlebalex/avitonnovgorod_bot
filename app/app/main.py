@@ -15,10 +15,9 @@ from .database import engine
 from .models import Base
 
 # Роутеры
-from .api import router as api_router                 # /api/...
-from .webapp_api import router as webapp_api_router   # /api/webapp/...
-from .webapp import page_router as webapp_page        # /webapp (HTML)
-
+from .api import router as api_router                    # /api/...
+from .webapp import router as webapp_router             # /api/webapp/...
+from .webapp import page_router as webapp_page_router   # /webapp (HTML)
 
 # --- helpers -----------------------------------------------------------------
 def _env_bool(name: str, default: str = "false") -> bool:
@@ -43,7 +42,6 @@ def _count_whitelist(path: str) -> int:
     try:
         with p.open("r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
-            # терпим к регистру заголовков
             fn = {name.lower(): name for name in (reader.fieldnames or [])}
             phone_key = fn.get("phone") or "phone"
             for row in reader:
@@ -60,14 +58,13 @@ STRICT_WHITELIST: bool = _env_bool("STRICT_WHITELIST", "false")
 WHITELIST_PATH: str = os.getenv("WHITELIST_PATH", "./data/participants_template.csv").strip()
 PROOFS_DIR: str = os.getenv("PROOFS_DIR", "/code/data/proofs").strip()
 
-
 # --- APP ---------------------------------------------------------------------
 app = FastAPI(title="QuestBot")
 
 # Роутеры
-app.include_router(api_router)            # /api/...
-app.include_router(webapp_api_router)     # /api/webapp/...
-app.include_router(webapp_page)           # /webapp
+app.include_router(api_router)          # /api/...
+app.include_router(webapp_router)       # /api/webapp/...
+app.include_router(webapp_page_router)  # /webapp
 
 # CORS (при необходимости можно сузить список источников)
 app.add_middleware(
@@ -77,7 +74,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 @app.on_event("startup")
 def on_startup() -> None:
