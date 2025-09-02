@@ -1,9 +1,7 @@
 import os, re, aiohttp, logging
 
-# ЛОГИ
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
-# === ENV ===
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 if not BOT_TOKEN or not re.match(r"^\d+:[\w-]+$", BOT_TOKEN):
     raise SystemExit("BOT_TOKEN отсутствует или некорректен")
@@ -16,9 +14,10 @@ STRICT_WHITELIST = os.getenv("STRICT_WHITELIST", "true").lower() in ("1","true",
 PARTICIPANTS_CSV = os.getenv("PARTICIPANTS_CSV", "/code/data/participants.csv")
 PARTICIPANTS_CSV_FALLBACK = "/code/data/participants_template.csv"
 
-CLIENT_TIMEOUT = aiohttp.ClientTimeout(total=20, connect=5, sock_connect=5, sock_read=15)
+# WebApp (для инлайн-кнопки)
+WEBAPP_URL = (os.getenv("WEBAPP_URL") or f"{API_BASE}/webapp").strip()
 
-# Глобальная сессия HTTP
+CLIENT_TIMEOUT = aiohttp.ClientTimeout(total=20, connect=5, sock_connect=5, sock_read=15)
 HTTP: aiohttp.ClientSession | None = None
 
 async def get_http() -> aiohttp.ClientSession:

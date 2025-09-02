@@ -2,7 +2,8 @@ from aiogram import Router, F
 from aiogram.types import Message
 from ..api_client import roster_by_tg, leaderboard, team_by_tg
 from ..utils import format_roster
-from ..config import API_BASE
+from ..texts import HELP_CONTACTS
+from ..keyboards import ib_leaderboard
 
 router = Router()
 
@@ -35,14 +36,18 @@ async def cmd_status(m: Message):
     st_t, info = await team_by_tg(m.from_user.id)
     if st_t != 200:
         return await m.answer("Ты ещё не зарегистрирован. /reg")
-    # найдём в лидерборде свою строку
     st, rows = await leaderboard()
-    done, total = 0, 0
-    place = "—"
+    done, total, place = 0, 0, "—"
     if st == 200 and isinstance(rows, list):
         for idx, r in enumerate(rows, 1):
             if r.get("team_id") == info["team_id"]:
                 done, total = r.get("tasks_done", 0), r.get("total_tasks", 0)
                 place = str(idx)
                 break
-    await m.answer(f"Статус: {done}/{total}\nЛидерборд: {place} место.")
+    await m.answer(f"Статус: {done}/{total}\nЛидерборд: {place} место.", reply_markup=ib_leaderboard())
+
+# NEW: «Поддержка»
+@router.message(F.text.in_({"Поддержка"}))
+async def support(m: Message):
+    # При желании подставь реальные контакты
+    await m.answer(HELP_CONTACTS.format(name="Координатор", phone="+7 999 000 00 00"))
