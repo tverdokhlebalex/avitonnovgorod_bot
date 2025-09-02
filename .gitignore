@@ -17,3 +17,10 @@ dist/
 *.egg-info/
 # proofs
 code/data/proofs/
+wheelhouse/
+*.whl
+x-app-secret*
+*.bak
+__pycache__/
+*.py[cod]
+.env
