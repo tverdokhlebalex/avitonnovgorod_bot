@@ -22,13 +22,23 @@ class Watchers:
         self._tasks: dict[int, asyncio.Task] = {}
         self._states: dict[int, _State] = {}
 
+    def running(self, team_id: int) -> bool:
+        t = self._tasks.get(team_id)
+        return bool(t and not t.done())
+
     def start(self, team_id: int, chat_id: int, tg_id: int | str, bot: Bot):
-        # один цикл на команду: если был — отменяем и запускаем заново
+        # ИДЕМПОТЕНТНО: если уже запущен — выходим, ничего не перезапускаем
         t = self._tasks.get(team_id)
         if t and not t.done():
-            t.cancel()
-        st = _State(team_id, tg_id, bot)
-        self._states[team_id] = st
+            return
+        # сохраняем состояние, если уже было (чтобы не терять last_cp_id)
+        st = self._states.get(team_id)
+        if st:
+            st.tg_id = str(tg_id)
+            st.bot = bot
+        else:
+            st = _State(team_id, tg_id, bot)
+            self._states[team_id] = st
         self._tasks[team_id] = asyncio.create_task(self._loop(st))
 
     async def _broadcast(self, tg_id: str, text: str, bot: Bot, *, markdown: bool = True):
@@ -62,13 +72,15 @@ class Watchers:
     async def _loop(self, st: _State):
         backoff = 1
         try:
-            # Сразу пробуем прислать текущее задание ровно ОДИН раз
-            code, data = await current_checkpoint(st.tg_id)
-            if code == 200 and isinstance(data, dict) and not data.get("finished"):
-                cp = data.get("checkpoint") or {}
-                if cp.get("id"):
-                    st.last_cp_id = cp["id"]
-                    await self._broadcast(st.tg_id, format_task_card(cp), st.bot, markdown=True)
+            # При первом запуске: один раз присылаем текущее задание, если его ещё не слали
+            if st.last_cp_id is None:
+                code, data = await current_checkpoint(st.tg_id)
+                if code == 200 and isinstance(data, dict) and not data.get("finished"):
+                    cp = data.get("checkpoint") or {}
+                    cp_id = cp.get("id")
+                    if cp_id:
+                        st.last_cp_id = cp_id
+                        await self._broadcast(st.tg_id, format_task_card(cp), st.bot, markdown=True)
 
             while True:
                 await asyncio.sleep(POLL_SECONDS)

@@ -65,12 +65,13 @@ async def cmd_start(m: Message):
         await _broadcast_to_team(m, "🚀 Квест начат!", markdown=False)
 
         # Запускаем вотчер — он сам разошлёт ПЕРВОЕ задание 1 раз
-        WATCHERS.start(
-            team_id=resp["team_id"],
-            chat_id=m.chat.id,
-            tg_id=m.from_user.id,
-            bot=m.bot,
-        )
+        if not WATCHERS.running(info["team_id"]):
+            WATCHERS.start(
+                team_id=info["team_id"],
+                chat_id=m.chat.id,
+                tg_id=m.from_user.id,
+                bot=m.bot,
+            )
 
         # Подсказка про мини-приложение
         await m.answer(
