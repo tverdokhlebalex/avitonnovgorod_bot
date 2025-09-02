@@ -4,7 +4,7 @@ import logging
 from urllib.parse import urlparse
 
 from aiogram import Router, F
-from aiogram.types import Message
+from aiogram.types import Message, ReplyKeyboardRemove  # 👈 добавили ReplyKeyboardRemove
 from aiogram.fsm.context import FSMContext
 
 from ..states import RegStates
@@ -89,6 +89,12 @@ async def reg_name(m: Message, state: FSMContext):
     if st != 200:
         logging.error("register_user failed: %s %s", st, payload)
         return await m.answer("Сервис регистрации временно недоступен.")
+
+    # 👇 Спрячем КЛАВИАТУРУ «Отправить телефон» СРАЗУ после успешной регистрации
+    try:
+        await m.answer("✅ Регистрация завершена!", reply_markup=ReplyKeyboardRemove())
+    except Exception:
+        pass
 
     # Состав + (опционально) кнопка WebApp
     st_r, roster = await roster_by_tg(m.from_user.id)
