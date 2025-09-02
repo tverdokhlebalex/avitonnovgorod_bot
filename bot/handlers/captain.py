@@ -1,89 +1,201 @@
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
-from aiogram.fsm.context import FSMContext
+from aiogram.types import Message
 from aiogram.enums import ContentType
-from ..api_client import team_by_tg, team_rename, start_game, submit_photo, current_checkpoint
-from ..states import PhotoStates, CaptainStates
+from ..api_client import team_by_tg, team_rename, start_game, submit_photo
 from ..watchers import WATCHERS
-from ..utils import format_roster
-from ..texts import RULES_SHORT
-from ..keyboards import ib_start_confirm  # ← NEW
+from ..texts import RULES_SHORT, ASK_TEAM_NAME, STARTED_MSG, APP_HINT
+from ..keyboards import kb_confirm_start, ib_webapp
+from ..config import API_BASE
 
 router = Router()
 
-async def _ensure_captain(m: Message) -> tuple[bool, dict | None]:
+async def _load_team(m: Message):
     st, info = await team_by_tg(m.from_user.id)
-    if st != 200 or not info:
+    if st != 200:
         await m.answer("Ты не в команде. Набери /reg.")
-        return False, None
-    if not info.get("is_captain"):
-        await m.answer("Эта команда уже имеет капитана. Со мной общается только капитан.")
-        return False, info
-    return True, info
+        return None
+    return info
 
-async def _start_and_watch(m: Message, team_id: int):
-    WATCHERS.start(team_id=team_id, chat_id=m.chat.id, tg_id=m.from_user.id, bot=m.bot)
-    st, cur = await current_checkpoint(m.from_user.id)
-    if st == 200 and not cur.get("finished"):
-        cp = cur["checkpoint"]
-        await m.answer(
-            f"*Задание {cp['order_num']}/{cp.get('total','?')} — {cp.get('title','')}*\n\n{cp.get('riddle','')}",
-            parse_mode="Markdown"
-        )
+def _is_captain(info: dict) -> bool:
+    return bool(info and info.get("is_captain"))
 
-@router.message(CaptainStates.waiting_team_name, F.text)
-async def captain_name_from_state(m: Message, state: FSMContext):
-    ok, _ = await _ensure_captain(m)
-    if not ok:
-        return await state.clear()
-
+# --- Переименование без команды /rename ---
+@router.message(F.text & ~F.text.startswith("/"))
+async def maybe_team_name(m: Message):
+    info = await _load_team(m)
+    if not info or not _is_captain(info):
+        return
+    # можно переименовать один раз, до старта, только полной команде
+    can_rename = info.get("can_rename", True)
+    started = bool(info.get("started_at"))
+    if not can_rename or started:
+        return
+    # уточним состав и “полноту” на сервере
+    # сервер сам вернёт 409 если нельзя
     new_name = (m.text or "").strip()
     if len(new_name) < 2:
-        return await m.answer("Название слишком короткое. Ещё раз:")
-
+        return
     st, resp = await team_rename(m.from_user.id, new_name)
     if st == 200 and resp.get("ok"):
-        await state.clear()
         await m.answer(f"Готово! Новое имя команды: *{resp.get('team_name')}*.", parse_mode="Markdown")
-        # инструкция без кнопок
+        # короткая инструкция (без кнопки) и вопрос о старте
         await m.answer(RULES_SHORT, parse_mode="Markdown")
-        # ← теперь спрашиваем подтверждение, НО НЕ стартуем сами
-        await m.answer("Готовы стартовать?", reply_markup=ib_start_confirm())
-    else:
-        await m.answer(resp.get("detail") or "Переименование недоступно. Введите другое имя:")
+        await m.answer("Готовы стартовать?", reply_markup=kb_confirm_start())
+    # если 409 — молча игнорим (скорее всего не готово для переименования)
 
-# Фолбек: капитан может просто прислать имя без /rename
-@router.message(F.text & ~F.text.regexp(r"^/"))
-async def captain_name_fallback(m: Message, state: FSMContext):
-    ok, info = await _ensure_captain(m)
-    if not ok or not info:
+# --- Явная команда /rename тоже остаётся, на всякий ---
+@router.message(F.text.regexp(r"^/rename(\s+.+)?$"))
+async def cmd_rename(m: Message):
+    info = await _load_team(m)
+    if not info or not _is_captain(info):
         return
-    # Разрешаем ввод названия, пока команда не стартовала
-    st, cur = await current_checkpoint(m.from_user.id)
-    if st == 200:   # уже стартовали — игнор
-        return
-    await captain_name_from_state(m, state)
-
-@router.callback_query(F.data == "start_yes")
-async def on_start_yes(c: CallbackQuery):
-    # проверим, что жмёт именно капитан
-    st, info = await team_by_tg(c.from_user.id)
-    if st != 200 or not info or not info.get("is_captain"):
-        return await c.answer("Только капитан может стартовать", show_alert=True)
-
-    st2, resp = await start_game(c.from_user.id)
-    await c.answer()
-    if st2 == 200:
-        await c.message.answer("🚀 Квест начат!")
-        # отправим первое задание сразу
-        class _Msg:  # небольшой адаптер, чтобы использовать _start_and_watch
-            def __init__(self, c): self.chat=c.message.chat; self.bot=c.bot; self.from_user=c.from_user
-            async def answer(self, *a, **kw): return await c.message.answer(*a, **kw)
-        await _start_and_watch(_Msg(c), info["team_id"])
+    parts = (m.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        return await m.answer("Использование: `/rename Новое имя команды`", parse_mode="Markdown")
+    st, resp = await team_rename(m.from_user.id, parts[1].strip())
+    if st == 200 and resp.get("ok"):
+        await m.answer(f"Готово! Новое имя команды: *{resp.get('team_name')}*.", parse_mode="Markdown")
+        await m.answer(RULES_SHORT, parse_mode="Markdown")
+        await m.answer("Готовы стартовать?", reply_markup=kb_confirm_start())
     else:
-        await c.message.answer(resp.get("detail") or "Старт недоступен.")
+        await m.answer(resp.get("detail") or "Переименование недоступно.")
 
-@router.callback_query(F.data == "start_no")
-async def on_start_no(c: CallbackQuery):
-    await c.answer("Ок, нажмите «Стартуем!» когда будете готовы.")
-    await c.message.answer("Хорошо, не спешим. Когда команда соберётся — жмите кнопку «Стартуем!» или команду /startquest.")
+# --- Старт: кнопка “Стартовать” или /startquest ---
+@router.message(F.text.in_({"/startquest", "Стартовать"}))
+async def cmd_start(m: Message):
+    info = await _load_team(m)
+    if not info or not _is_captain(info): 
+        return
+    st, resp = await start_game(m.from_user.id)
+    if st == 200 and resp.get("ok"):
+        # всем участникам сообщим о старте; вотчер пошлёт первое задание
+        await m.answer(STARTED_MSG)
+        # сразу запускаем вотчер (без доп. проверок)
+        WATCHERS.start(team_id=resp["team_id"], chat_id=m.chat.id, tg_id=m.from_user.id, bot=m.bot)
+        # и напоминание про мини-приложение
+        await m.answer(APP_HINT, parse_mode="Markdown", reply_markup=ib_webapp(f"{API_BASE}/webapp"))
+    elif st == 200:
+        await m.answer(resp.get("message") or "Уже начали.")
+    else:
+        await m.answer(resp.get("detail") or "Старт недоступен.")
+
+# --- Фото только от капитана ---
+@router.message(F.text == "/photo")
+async def cmd_photo_hint(m: Message):
+    info = await _load_team(m)
+    if not info or not _is_captain(info):
+        return
+    await m.answer("Ок! Пришли *фото* текущей точки одним сообщением.", parse_mode="Markdown")
+
+@router.message(F.content_type == ContentType.PHOTO)
+async def on_any_photo(m: Message):
+    info = await _load_team(m)
+    if not info or not _is_captain(info):
+        return await m.answer("Эта команда уже имеет капитана. Со мной общается только капитан.")
+    file_id = m.photo[-1].file_id
+    st2, resp = await submit_photo(m.from_user.id, file_id)
+    if st2 == 200 and resp.get("ok"):
+        await m.answer("Принял, отправил модератору. Ждём ⚡")
+        WATCHERS.start(team_id=info["team_id"], chat_id=m.chat.id, tg_id=m.from_user.id, bot=m.bot)
+    else:
+        await m.answer(resp.get("detail") or "Не удалось отправить фото.")from aiogram import Router, F
+from aiogram.types import Message
+from aiogram.enums import ContentType
+from ..api_client import team_by_tg, team_rename, start_game, submit_photo
+from ..watchers import WATCHERS
+from ..texts import RULES_SHORT, ASK_TEAM_NAME, STARTED_MSG, APP_HINT
+from ..keyboards import kb_confirm_start, ib_webapp
+from ..config import API_BASE
+
+router = Router()
+
+async def _load_team(m: Message):
+    st, info = await team_by_tg(m.from_user.id)
+    if st != 200:
+        await m.answer("Ты не в команде. Набери /reg.")
+        return None
+    return info
+
+def _is_captain(info: dict) -> bool:
+    return bool(info and info.get("is_captain"))
+
+# --- Переименование без команды /rename ---
+@router.message(F.text & ~F.text.startswith("/"))
+async def maybe_team_name(m: Message):
+    info = await _load_team(m)
+    if not info or not _is_captain(info):
+        return
+    # можно переименовать один раз, до старта, только полной команде
+    can_rename = info.get("can_rename", True)
+    started = bool(info.get("started_at"))
+    if not can_rename or started:
+        return
+    # уточним состав и “полноту” на сервере
+    # сервер сам вернёт 409 если нельзя
+    new_name = (m.text or "").strip()
+    if len(new_name) < 2:
+        return
+    st, resp = await team_rename(m.from_user.id, new_name)
+    if st == 200 and resp.get("ok"):
+        await m.answer(f"Готово! Новое имя команды: *{resp.get('team_name')}*.", parse_mode="Markdown")
+        # короткая инструкция (без кнопки) и вопрос о старте
+        await m.answer(RULES_SHORT, parse_mode="Markdown")
+        await m.answer("Готовы стартовать?", reply_markup=kb_confirm_start())
+    # если 409 — молча игнорим (скорее всего не готово для переименования)
+
+# --- Явная команда /rename тоже остаётся, на всякий ---
+@router.message(F.text.regexp(r"^/rename(\s+.+)?$"))
+async def cmd_rename(m: Message):
+    info = await _load_team(m)
+    if not info or not _is_captain(info):
+        return
+    parts = (m.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        return await m.answer("Использование: `/rename Новое имя команды`", parse_mode="Markdown")
+    st, resp = await team_rename(m.from_user.id, parts[1].strip())
+    if st == 200 and resp.get("ok"):
+        await m.answer(f"Готово! Новое имя команды: *{resp.get('team_name')}*.", parse_mode="Markdown")
+        await m.answer(RULES_SHORT, parse_mode="Markdown")
+        await m.answer("Готовы стартовать?", reply_markup=kb_confirm_start())
+    else:
+        await m.answer(resp.get("detail") or "Переименование недоступно.")
+
+# --- Старт: кнопка “Стартовать” или /startquest ---
+@router.message(F.text.in_({"/startquest", "Стартовать"}))
+async def cmd_start(m: Message):
+    info = await _load_team(m)
+    if not info or not _is_captain(info): 
+        return
+    st, resp = await start_game(m.from_user.id)
+    if st == 200 and resp.get("ok"):
+        # всем участникам сообщим о старте; вотчер пошлёт первое задание
+        await m.answer(STARTED_MSG)
+        # сразу запускаем вотчер (без доп. проверок)
+        WATCHERS.start(team_id=resp["team_id"], chat_id=m.chat.id, tg_id=m.from_user.id, bot=m.bot)
+        # и напоминание про мини-приложение
+        await m.answer(APP_HINT, parse_mode="Markdown", reply_markup=ib_webapp(f"{API_BASE}/webapp"))
+    elif st == 200:
+        await m.answer(resp.get("message") or "Уже начали.")
+    else:
+        await m.answer(resp.get("detail") or "Старт недоступен.")
+
+# --- Фото только от капитана ---
+@router.message(F.text == "/photo")
+async def cmd_photo_hint(m: Message):
+    info = await _load_team(m)
+    if not info or not _is_captain(info):
+        return
+    await m.answer("Ок! Пришли *фото* текущей точки одним сообщением.", parse_mode="Markdown")
+
+@router.message(F.content_type == ContentType.PHOTO)
+async def on_any_photo(m: Message):
+    info = await _load_team(m)
+    if not info or not _is_captain(info):
+        return await m.answer("Эта команда уже имеет капитана. Со мной общается только капитан.")
+    file_id = m.photo[-1].file_id
+    st2, resp = await submit_photo(m.from_user.id, file_id)
+    if st2 == 200 and resp.get("ok"):
+        await m.answer("Принял, отправил модератору. Ждём ⚡")
+        WATCHERS.start(team_id=info["team_id"], chat_id=m.chat.id, tg_id=m.from_user.id, bot=m.bot)
+    else:
+        await m.answer(resp.get("detail") or "Не удалось отправить фото.")

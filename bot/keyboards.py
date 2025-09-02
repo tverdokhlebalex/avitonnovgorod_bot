@@ -2,13 +2,6 @@ from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 )
-from .config import build_webapp_url
-
-def kb_user_main() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="Статус"), KeyboardButton(text="Поддержка")]],
-        resize_keyboard=True
-    )
 
 def kb_request_phone() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -16,14 +9,22 @@ def kb_request_phone() -> ReplyKeyboardMarkup:
         resize_keyboard=True, one_time_keyboard=True
     )
 
-def ib_leaderboard(tg_id: int | str) -> InlineKeyboardMarkup:
-    # Откроется именно Telegram WebApp
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="Лидерборд", web_app=WebAppInfo(url=build_webapp_url(tg_id)))
-    ]])
+# единственная постоянная кнопка — открыть мини-приложение
+def kb_webapp(url: str) -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="Лидерборд", web_app=WebAppInfo(url=url))]],
+        resize_keyboard=True
+    )
 
-def ib_start_confirm() -> InlineKeyboardMarkup:
+# inline-кнопка для открытия мини-приложения (используем в сообщениях)
+def ib_webapp(url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Стартуем!", callback_data="start_yes")],
-        [InlineKeyboardButton(text="Ещё минутку", callback_data="start_no")],
+        [InlineKeyboardButton(text="Открыть мини-приложение", web_app=WebAppInfo(url=url))]
     ])
+
+# подтверждение старта (только одна кнопка)
+def kb_confirm_start() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="Стартовать")]],
+        resize_keyboard=True, one_time_keyboard=True
+    )
