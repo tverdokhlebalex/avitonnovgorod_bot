@@ -9,6 +9,7 @@ import hashlib
 import urllib.parse
 from datetime import datetime
 from typing import Optional, List, Dict, Any
+from sqlalchemy import func, update
 
 from fastapi import (
     APIRouter, Depends, UploadFile, File, HTTPException, Header, Path, Form, Body, Query
@@ -159,6 +160,36 @@ def _require_team_started(team: models.Team):
     if not getattr(team, "started_at", None):
         raise HTTPException(409, "Team has not started yet")
 
+# ---------- helpers (добавить рядом с другими утилитами) ----------
+def _auto_assign_route_if_needed(db: Session, team: models.Team) -> bool:
+    """
+    Если у команды ещё не выбран маршрут — выбрать самый «свободный»
+    (по числу уже назначенных команд). Возвращает True, если назначили.
+    """
+    if getattr(team, "route_id", None):
+        return False
+
+    routes = db.query(models.Route).order_by(models.Route.id.asc()).all()
+    if not routes:
+        return False
+
+    best = None
+    best_cnt = None
+    for r in routes:
+        cnt = (
+            db.query(func.count(models.Team.id))
+            .filter(models.Team.route_id == r.id)
+            .scalar()
+        ) or 0
+        if best_cnt is None or cnt < best_cnt:
+            best, best_cnt = r, cnt
+
+    if not best:
+        return False
+
+    team.route_id = best.id
+    db.commit()
+    return True
 
 # ---- Маршруты / чекпойнты / доказательства ---------------------------------
 
