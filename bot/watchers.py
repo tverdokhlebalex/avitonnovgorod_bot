@@ -9,13 +9,15 @@ from .texts import FINISH_MSG, format_task_card
 
 POLL_SECONDS = 4
 
+
 class _State:
     def __init__(self, team_id: int, tg_id: int | str, bot: Bot):
         self.team_id = team_id
         self.tg_id = str(tg_id)
         self.bot = bot
         self.last_cp_id: int | None = None
-        self.finished_sent = False
+        self.finished_sent: bool = False
+
 
 class Watchers:
     def __init__(self):
@@ -27,11 +29,19 @@ class Watchers:
         return bool(t and not t.done())
 
     def start(self, team_id: int, chat_id: int, tg_id: int | str, bot: Bot):
-        # ИДЕМПОТЕНТНО: если уже запущен — выходим, ничего не перезапускаем
+        """
+        ИДЕМПОТЕНТНО: если цикл для team_id уже крутится — ничего не делаем.
+        Иначе поднимаем цикл, не теряя last_cp_id (если уже был).
+        """
         t = self._tasks.get(team_id)
         if t and not t.done():
+            # обновим ссылку на актуальные tg_id / bot и выйдем
+            st = self._states.get(team_id)
+            if st:
+                st.tg_id = str(tg_id)
+                st.bot = bot
             return
-        # сохраняем состояние, если уже было (чтобы не терять last_cp_id)
+
         st = self._states.get(team_id)
         if st:
             st.tg_id = str(tg_id)
@@ -39,6 +49,7 @@ class Watchers:
         else:
             st = _State(team_id, tg_id, bot)
             self._states[team_id] = st
+
         self._tasks[team_id] = asyncio.create_task(self._loop(st))
 
     async def _broadcast(self, tg_id: str, text: str, bot: Bot, *, markdown: bool = True):
@@ -50,8 +61,8 @@ class Watchers:
             roster = None
             st = 0
 
+        # fallback — хотя бы капитану
         if st != 200 or not roster:
-            # fallback — хотя бы капитану
             try:
                 await bot.send_message(int(tg_id), text, parse_mode=parse_mode)
             except Exception:
@@ -72,11 +83,11 @@ class Watchers:
     async def _loop(self, st: _State):
         backoff = 1
         try:
-            # При первом запуске: один раз присылаем текущее задание, если его ещё не слали
+            # На старте: если ещё не слали текущую карточку — пришлём один раз
             if st.last_cp_id is None:
                 code, data = await current_checkpoint(st.tg_id)
                 if code == 200 and isinstance(data, dict) and not data.get("finished"):
-                    cp = data.get("checkpoint") or {}
+                    cp = (data.get("checkpoint") or {})
                     cp_id = cp.get("id")
                     if cp_id:
                         st.last_cp_id = cp_id
@@ -96,15 +107,35 @@ class Watchers:
                 if code != 200 or not isinstance(data, dict):
                     continue
 
+                # Финиш
                 if data.get("finished"):
                     if not st.finished_sent:
-                        await self._broadcast(st.tg_id, FINISH_MSG.format(team="ваша команда"), st.bot, markdown=True)
+                        await self._broadcast(
+                            st.tg_id,
+                            FINISH_MSG.format(team="ваша команда"),
+                            st.bot,
+                            markdown=True
+                        )
                         st.finished_sent = True
                     break
 
                 cp = (data or {}).get("checkpoint") or {}
                 cp_id = cp.get("id")
-                if cp_id and cp_id != st.last_cp_id:
+                if not cp_id:
+                    continue
+
+                # Смена чекпоинта => предыдущее задание зачтено
+                if st.last_cp_id is not None and cp_id != st.last_cp_id:
+                    num = cp.get("order_num")
+                    total = cp.get("total")
+                    # аккуратно формируем "N-1/total"
+                    if isinstance(num, int) and isinstance(total, int) and num > 1:
+                        ack = f"✅ Задание {num-1}/{total} зачтено!"
+                    else:
+                        ack = "✅ Предыдущее задание зачтено!"
+                    await self._broadcast(st.tg_id, ack, st.bot, markdown=False)
+
+                    # карточка нового задания
                     await self._broadcast(st.tg_id, format_task_card(cp), st.bot, markdown=True)
                     st.last_cp_id = cp_id
 
@@ -112,5 +143,6 @@ class Watchers:
             pass
         except Exception:
             logging.exception("watcher loop error (team %s)", st.team_id)
+
 
 WATCHERS = Watchers()
