@@ -23,7 +23,29 @@ async def _req_json(method: str, path: str, *, data: Any | None = None, form: di
     except aiohttp.ClientError as e:
         logging.error("%s %s failed: %r", method, url, e)
         raise
+async def game_current(tg_id: int) -> tuple[int, dict]:
+    """
+    GET /api/game/current?tg_id=<tg_id>
+    Возвращает:
+      { finished: bool, checkpoint: { id, order_num, title, riddle, photo_hint, total } | None }
+    """
+    from .config import API_BASE, APP_SECRET
+    import aiohttp
 
+    url = f"{API_BASE}/api/game/current"
+    params = {"tg_id": str(tg_id)}
+    headers = {"x-app-secret": APP_SECRET}
+
+    async with aiohttp.ClientSession() as s:
+        async with s.get(url, params=params, headers=headers) as r:
+            st = r.status
+            try:
+                data = await r.json()
+            except Exception:
+                data = {"detail": await r.text()}
+            return st, data
+        
+        
 # ---- публичные обёртки ----
 async def team_by_tg(tg_id: int | str):         return await _req_json("GET",  f"/api/teams/by-tg/{tg_id}")
 async def roster_by_tg(tg_id: int | str):       return await _req_json("GET",  f"/api/teams/roster/by-tg/{tg_id}")

@@ -32,3 +32,22 @@ ASK_START = "Готовы стартовать?"
 APP_HINT = "Всю актуальную информацию по квесту смотрите в *мини-приложении*."
 STARTED_MSG = "🚀 Квест начат!"
 APPROVED_MSG = "✅ Задание {num} зачтено! Едем дальше."
+
+def format_task_card(cp: dict) -> str:
+    num = cp.get("order_num") or "?"
+    total = cp.get("total") or "?"
+    title = cp.get("title") or "Задание"
+    riddle = (cp.get("riddle") or "").strip()
+    hint = (cp.get("photo_hint") or "").strip()
+
+    header = f"*Задание {num}/{total} — {title}*"
+    body = riddle if riddle else ""
+    # либо используем hint, либо один дефолт — но не оба
+    if hint:
+        tail = hint
+    else:
+        tail = "Ждём ваше фото на этой точке маршрута :)"
+
+    recommendation = "_Рекомендация к фото:_ Вся команда + фото разгаданной локации. Снимайте с нижней точки."
+    parts = [header, body, tail, recommendation]
+    return "\n\n".join([p for p in parts if p])
