@@ -3,13 +3,9 @@ import os
 import csv
 import io
 import re
-import hmac
 import json
-import hashlib
-import urllib.parse
 from datetime import datetime
 from typing import Optional, List, Dict, Any
-from sqlalchemy import func, update
 
 from fastapi import (
     APIRouter, Depends, UploadFile, File, HTTPException, Header, Path, Form, Body, Query
@@ -23,7 +19,7 @@ from .schemas import (
     # public
     RegisterIn, RegisterOut, ImportReport, TeamOut, TeamRosterOut,
     # team structs / admin
-    TeamMemberInfo, TeamAdminOut, SetCaptainIn, MoveMemberIn, AdminTeamUpdateIn,
+    TeamMemberInfo, TeamAdminOut, SetCaptainIn, MoveMemberIn,
     # tasks / game (совместимость со старым API)
     TaskOut, TaskCreateIn, TaskUpdateIn, GameScanIn, GameScanOut,
     # rename
@@ -39,9 +35,6 @@ APP_SECRET = os.getenv("APP_SECRET", "change-me-please")
 TEAM_SIZE = int(os.getenv("TEAM_SIZE", 7))
 PROOFS_DIR = os.getenv("PROOFS_DIR", "/code/data/proofs")
 os.makedirs(PROOFS_DIR, exist_ok=True)
-
-# Токен бота (используется только для WebApp-подписей в старых интеграциях)
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
 
 # --- security ---
@@ -160,39 +153,51 @@ def _require_team_started(team: models.Team):
     if not getattr(team, "started_at", None):
         raise HTTPException(409, "Team has not started yet")
 
-# ---------- helpers (добавить рядом с другими утилитами) ----------
+
+# ---------- routes helpers ----------
+def _routes_with_checkpoints(db: Session) -> list[models.Route]:
+    """Вернёт только маршруты, у которых есть хотя бы один чекпоинт."""
+    routes = db.query(models.Route).order_by(models.Route.id.asc()).all()
+    out: list[models.Route] = []
+    for r in routes:
+        cnt = (
+            db.query(func.count(models.Checkpoint.id))
+            .filter(models.Checkpoint.route_id == r.id)
+            .scalar()
+        ) or 0
+        if cnt > 0:
+            out.append(r)
+    return out
+
+
 def _auto_assign_route_if_needed(db: Session, team: models.Team) -> bool:
     """
-    Если у команды ещё не выбран маршрут — выбрать самый «свободный»
-    (по числу уже назначенных команд). Возвращает True, если назначили.
+    Если у команды ещё не выбран маршрут — выбрать маршрут
+    с минимальным числом уже привязанных команд (среди маршрутов с чекпоинтами).
+    Возвращает True, если назначили.
     """
     if getattr(team, "route_id", None):
-        return False
+        return True
 
-    routes = db.query(models.Route).order_by(models.Route.id.asc()).all()
+    routes = _routes_with_checkpoints(db)
     if not routes:
         return False
 
-    best = None
-    best_cnt = None
+    counts: Dict[int, int] = {}
     for r in routes:
-        cnt = (
+        counts[r.id] = (
             db.query(func.count(models.Team.id))
             .filter(models.Team.route_id == r.id)
             .scalar()
         ) or 0
-        if best_cnt is None or cnt < best_cnt:
-            best, best_cnt = r, cnt
 
-    if not best:
-        return False
-
-    team.route_id = best.id
+    chosen = min(routes, key=lambda r: counts.get(r.id, 0))
+    team.route_id = chosen.id
     db.commit()
     return True
 
-# ---- Маршруты / чекпойнты / доказательства ---------------------------------
 
+# ---- Маршруты / чекпойнты / доказательства ---------------------------------
 def _route_total_checkpoints(db: Session, route_id: int | None) -> int:
     if not route_id:
         return 0
@@ -271,6 +276,10 @@ def register_or_assign(payload: RegisterIn, db: Session = Depends(get_db)):
         _ensure_captain_if_full(db, team.id)
     else:
         team = db.get(models.Team, member.team_id)
+
+    # Если команда полная и маршрута нет — назначим автоматически
+    if _team_is_full(db, team.id) and not getattr(team, "route_id", None):
+        _auto_assign_route_if_needed(db, team)
 
     return RegisterOut(user_id=user.id, team_id=team.id, team_name=team.name)
 
@@ -459,9 +468,13 @@ def game_start(
     if not _team_is_full(db, team.id):
         raise HTTPException(409, "Team is not full yet")
 
+    # Гарантируем маршрут: если ещё не назначен — назначим
     if not getattr(team, "route_id", None):
-        raise HTTPException(409, "Route is not assigned for this team")
+        ok = _auto_assign_route_if_needed(db, team)
+        if not ok:
+            raise HTTPException(409, "Route is not assigned for this team")
 
+    # Нельзя стартовать с именем по умолчанию, если переименование ещё доступно
     is_default = bool(re.match(r"^Команда №\d+$", team.name or ""))
     if is_default and getattr(team, "can_rename", True):
         raise HTTPException(409, "Set custom team name first")
@@ -470,7 +483,13 @@ def game_start(
     if not getattr(team, "current_order_num", None):
         team.current_order_num = 1
     db.commit()
-    return {"ok": True, "message": "Started", "team_id": team.id, "team_name": team.name, "started_at": team.started_at.isoformat()}
+    return {
+        "ok": True,
+        "message": "Started",
+        "team_id": team.id,
+        "team_name": team.name,
+        "started_at": team.started_at.isoformat(),
+    }
 
 
 # ---------- GAME: текущая точка (бот / интеграции) ----------
@@ -880,7 +899,7 @@ def admin_pending(db: Session = Depends(get_db)):
 
 def _progress_tuple(db: Session, team: models.Team) -> Dict[str, int]:
     done = _approved_count_cp(db, team.id)
-    total = _route_total_checkpoints(db, team.route_id)
+    total = _route_total_checkpoints(db, getattr(team, "route_id", None))
     return {"done": int(done), "total": int(total)}
 
 
