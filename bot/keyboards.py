@@ -9,20 +9,18 @@ def kb_request_phone() -> ReplyKeyboardMarkup:
         resize_keyboard=True, one_time_keyboard=True
     )
 
-# единственная постоянная кнопка — открыть мини-приложение
 def kb_webapp(url: str) -> ReplyKeyboardMarkup:
+    # постоянная кнопка на мини-приложение
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="Лидерборд", web_app=WebAppInfo(url=url))]],
         resize_keyboard=True
     )
 
-# inline-кнопка для открытия мини-приложения (используем в сообщениях)
 def ib_webapp(url: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Открыть мини-приложение", web_app=WebAppInfo(url=url))]
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="Открыть мини-приложение", web_app=WebAppInfo(url=url))]]
+    )
 
-# подтверждение старта (только одна кнопка)
 def kb_confirm_start() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="Стартовать")]],

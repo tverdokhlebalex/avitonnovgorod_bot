@@ -2,6 +2,7 @@ import logging
 from aiogram import Router, F
 from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
+from ..states import RegStates
 from ..keyboards import kb_request_phone, kb_webapp
 from ..api_client import register_user, roster_by_tg
 from ..utils import norm_phone, KNOWN, load_participants, format_roster, only_first_name
@@ -16,61 +17,63 @@ async def onboarding(m: Message):
 
 @router.message(F.text == "/reg")
 async def reg_begin(m: Message, state: FSMContext):
-    await state.set_state()  # сброс
+    await state.set_state(RegStates.waiting_phone)
     await m.answer("Шаг 1/2: пришли номер телефона в формате +7XXXXXXXXXX", reply_markup=kb_request_phone())
 
-@router.message(F.contact)
+@router.message(RegStates.waiting_phone, F.contact)
 async def reg_phone_contact(m: Message, state: FSMContext):
-    # этап 1: телефон
-    data = await state.get_data()
-    if data.get("stage") == "name":  # уже на втором шаге
-        return
     me = m.contact
     if me and me.user_id and m.from_user and me.user_id != m.from_user.id:
         return await m.answer("Нужен *твой* номер.", parse_mode="Markdown")
     phone = norm_phone(me.phone_number if me else "")
     if not phone:
         return await m.answer("Не распознал номер. Пришли ещё раз.")
-    await state.update_data(stage="name", phone=phone)
+    await state.update_data(phone=phone)
+    await state.set_state(RegStates.waiting_name)
     await m.answer("Шаг 2/2: пришли *имя* (как тебя записать в команде).", parse_mode="Markdown")
 
-@router.message(F.text & ~F.text.startswith("/"))
-async def reg_flow(m: Message, state: FSMContext):
-    data = await state.get_data()
-    if data.get("stage") != "name":
-        return  # не в процессе регистрации
+@router.message(RegStates.waiting_phone, F.text)
+async def reg_phone_text(m: Message, state: FSMContext):
+    phone = norm_phone(m.text or "")
+    if not phone:
+        return await m.answer("Формат телефона не распознан. Пример: +79991234567")
+    await state.update_data(phone=phone)
+    await state.set_state(RegStates.waiting_name)
+    await m.answer("Шаг 2/2: пришли *имя* (как тебя записать в команде).", parse_mode="Markdown")
+
+@router.message(RegStates.waiting_name, F.text)
+async def reg_name(m: Message, state: FSMContext):
     first = (m.text or "").strip().split()[0].title()
     if len(first) < 2:
         return await m.answer("Имя слишком короткое. Минимум 2 символа.")
+    data = await state.get_data()
     phone = data.get("phone","")
     if STRICT_WHITELIST:
         load_participants()
         if phone not in KNOWN:
             await state.clear()
             return await m.answer("Не нашёл тебя в списке. Обратись к координатору.")
+
     st, payload = await register_user(m.from_user.id, phone, first)
     await state.clear()
     if st != 200:
         logging.error("register_user failed: %s %s", st, payload)
         return await m.answer("Сервис регистрации временно недоступен.")
 
-    # покажем состав + постоянную кнопку WebApp
+    # состав + постоянная кнопка WebApp
+    webapp_url = f"{API_BASE}/webapp"
     _, roster = await roster_by_tg(m.from_user.id)
-    webapp = f"{API_BASE}/webapp"
     if roster:
-        await m.answer(
-            format_roster(roster), parse_mode="Markdown",
-            reply_markup=kb_webapp(webapp)
-        )
+        await m.answer(format_roster(roster), parse_mode="Markdown", reply_markup=kb_webapp(webapp_url))
         members_count = len(roster.get("members") or [])
         cap = roster.get("captain")
         if cap:
             await m.answer(CAPTAIN_ASSIGNED.format(captain=only_first_name(cap)), parse_mode="Markdown")
-            # если капитан — другой человек и команда уже полная — пинганём капитана
-            if str(cap.get("tg_id")) != str(m.from_user.id) and members_count >= TEAM_SIZE:
+            # если команда уже полная — попросим капитана придумать имя (даже если последний регался не он)
+            if members_count >= TEAM_SIZE:
                 try:
-                    await m.bot.send_message(cap["tg_id"], ASK_TEAM_NAME, parse_mode="Markdown")
+                    await m.bot.send_message(cap["tg_id"], ASK_TEAM_NAME)
                 except Exception:
-                    logging.exception("failed to DM captain about team name")
+                    logging.exception("Failed to DM captain about team name")
     else:
-        await m.answer("Регистрация выполнена. /team — состав команды.", reply_markup=kb_webapp(webapp))
+        await m.answer("Регистрация выполнена. /team — состав команды.", reply_markup=kb_webapp(webapp_url))

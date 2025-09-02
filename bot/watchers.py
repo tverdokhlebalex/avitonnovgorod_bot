@@ -8,7 +8,7 @@ POLL_SECONDS = 5
 
 class WatcherManager:
     def __init__(self):
-        self._tasks: Dict[int, asyncio.Task] = {}  # team_id -> Task
+        self._tasks: Dict[int, asyncio.Task] = {}
 
     def running(self, team_id: int) -> bool:
         return team_id in self._tasks and not self._tasks[team_id].done()
@@ -19,47 +19,39 @@ class WatcherManager:
             t.cancel()
 
     def start(self, *, team_id: int, chat_id: int, tg_id: int | str, bot: Bot):
-        # один вотчер на команду
         self.cancel(team_id)
         self._tasks[team_id] = asyncio.create_task(self._loop(team_id, chat_id, tg_id, bot))
 
-    async def _notify_all(self, bot: Bot, captain_tg_id: int | str, text: str, parse_md: bool = True):
-        # получим состав по tg капитана и разошлём всем
+    async def _notify_all(self, bot: Bot, captain_tg_id: int | str, text: str, md: bool = True):
         st, roster = await roster_by_tg(captain_tg_id)
-        if st != 200 or not roster:  # fallback — только капитану
-            await bot.send_message(captain_tg_id, text, parse_mode="Markdown" if parse_md else None)
+        if st != 200 or not roster:
+            await bot.send_message(captain_tg_id, text, parse_mode="Markdown" if md else None)
             return
         sent: List[int] = []
         for m in (roster.get("members") or []):
             tg = m.get("tg_id")
-            if not tg or tg in sent:
+            if not tg or tg in sent: 
                 continue
             try:
-                await bot.send_message(tg, text, parse_mode="Markdown" if parse_md else None)
+                await bot.send_message(tg, text, parse_mode="Markdown" if md else None)
                 sent.append(tg)
             except Exception:
-                logging.exception("notify_all: failed to DM %s", tg)
+                logging.exception("notify_all failed for %s", tg)
 
     async def _loop(self, team_id: int, chat_id: int, tg_id: int | str, bot: Bot):
         last_order = None
         try:
-            # первый чек сразу (если уже есть задание — пришлём)
             st, cur = await current_checkpoint(tg_id)
             if st == 200 and not cur.get("finished"):
-                cp = cur["checkpoint"]
-                last_order = cp["order_num"]
+                cp = cur["checkpoint"]; last_order = cp["order_num"]
                 await self._send_task(bot, tg_id, cp)
             while True:
                 await asyncio.sleep(POLL_SECONDS)
                 st, cur = await current_checkpoint(tg_id)
-                if st != 200:
+                if st != 200: 
                     continue
                 if cur.get("finished"):
-                    # финал всем участникам
-                    await self._notify_all(
-                        bot, tg_id,
-                        FINISH_MSG.format(team="ваша команда")
-                    )
+                    await self._notify_all(bot, tg_id, FINISH_MSG.format(team="ваша команда"))
                     break
                 cp = cur["checkpoint"]
                 if last_order is None:
@@ -67,7 +59,6 @@ class WatcherManager:
                     await self._send_task(bot, tg_id, cp)
                     continue
                 if cp["order_num"] != last_order:
-                    # предыдущая принята
                     prev = last_order
                     last_order = cp["order_num"]
                     await self._notify_all(bot, tg_id, APPROVED_MSG.format(num=prev))
