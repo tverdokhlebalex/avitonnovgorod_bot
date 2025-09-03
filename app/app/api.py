@@ -1,14 +1,16 @@
 # app/app/api.py
+from __future__ import annotations
+
 import os
 import csv
 import io
 import re
-import json
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
 from fastapi import (
-    APIRouter, Depends, UploadFile, File, HTTPException, Header, Path, Form, Body, Query
+    APIRouter, Depends, UploadFile, File, HTTPException,
+    Header, Path, Form, Body, Query
 )
 from sqlalchemy import func, update
 from sqlalchemy.orm import Session
@@ -36,15 +38,17 @@ TEAM_SIZE = int(os.getenv("TEAM_SIZE", 7))
 PROOFS_DIR = os.getenv("PROOFS_DIR", "/code/data/proofs")
 os.makedirs(PROOFS_DIR, exist_ok=True)
 
-# --- security ---
+# --- security ---------------------------------------------------------------
 def require_secret(x_app_secret: str | None = Header(default=None, alias="x-app-secret")):
     if not x_app_secret or x_app_secret != APP_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-# !!! объявляем admin-подроутер ТОЛЬКО после require_secret
+
+# Админ-саброутер защищён заголовком x-app-secret
 admin = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_secret)])
 
-# --- helpers ---
+
+# --- helpers ----------------------------------------------------------------
 def now_utc() -> datetime:
     # проект везде использует naive UTC (без tzinfo)
     return datetime.utcnow()
@@ -175,7 +179,7 @@ def _auto_assign_route_if_needed(db: Session, team: models.Team) -> bool:
     """
     Если у команды ещё не выбран маршрут — выбрать маршрут
     с минимальным числом уже привязанных команд (среди маршрутов с чекпоинтами).
-    Возвращает True, если назначили.
+    Возвращает True, если назначили (или уже есть).
     """
     if getattr(team, "route_id", None):
         return True
@@ -240,56 +244,16 @@ def _advance_team_to_next_checkpoint(db: Session, team: models.Team) -> None:
     db.commit()
 
 
+def _progress_tuple(db: Session, team: models.Team) -> Dict[str, int]:
+    done = _approved_count_cp(db, team.id)
+    total = _route_total_checkpoints(db, getattr(team, "route_id", None))
+    return {"done": int(done), "total": int(total)}
+
+
 # =============================================================================
-#                         PUBLIC (requires x-app-secret)
+# PUBLIC (requires x-app-secret) — под основным роутером /api
+# =============================================================================
 
-@admin.get("/teams/{team_id}", response_model=TeamAdminOut)
-def admin_get_team(team_id: int = Path(..., ge=1), db: Session = Depends(get_db)):
-    team = db.get(models.Team, team_id)
-    if not team:
-        raise HTTPException(404, "Team not found")
-    return dump_team_admin(db, team)
-
-@admin.get("/proofs/pending", response_model=list)
-def admin_pending(db: Session = Depends(get_db)):
-    q = (
-        db.query(models.Proof, models.Team, models.Checkpoint, models.Route)
-        .join(models.Team, models.Team.id == models.Proof.team_id)
-        .join(models.Checkpoint, models.Checkpoint.id == models.Proof.checkpoint_id)
-        .join(models.Route, models.Route.id == models.Proof.route_id)
-        .filter(models.Proof.status == "PENDING")
-        .order_by(models.Proof.created_at.asc())
-        .all()
-    )
-    out = []
-    for proof, team, cp, route in q:
-        cap_row = (
-            db.query(models.TeamMember, models.User)
-            .join(models.User, models.User.id == models.TeamMember.user_id)
-            .filter(models.TeamMember.team_id == team.id, models.TeamMember.role == "CAPTAIN")
-            .one_or_none()
-        )
-        cap_tg = cap_name = None
-        if cap_row:
-            _, u = cap_row
-            cap_tg   = getattr(u, "tg_id", None)
-            cap_name = getattr(u, "first_name", None)
-
-        out.append({
-            "id": proof.id,
-            "team_id": team.id,
-            "team_name": team.name,
-            "route": route.code,
-            "checkpoint_id": cp.id,
-            "order_num": cp.order_num,
-            "checkpoint_title": cp.title,
-            "photo_file_id": proof.photo_file_id,
-            "captain_tg_id": cap_tg,
-            "captain_name": cap_name,
-            "submitted_by_user_id": getattr(proof, "submitted_by_user_id", None),
-            "created_at": proof.created_at.isoformat() if getattr(proof, "created_at", None) else None,
-        })
-    return out
 @router.post("/users/register", response_model=RegisterOut, dependencies=[Depends(require_secret)])
 def register_or_assign(payload: RegisterIn, db: Session = Depends(get_db)):
     phone = norm_phone(payload.phone)
@@ -539,7 +503,7 @@ def game_start(
     }
 
 
-# ---------- GAME: текущая точка (бот / интеграции) ----------
+# ---------- GAME: текущая точка ----------
 @router.get("/game/current", response_model=dict, dependencies=[Depends(require_secret)])
 def game_current(tg_id: str = Query(...), db: Session = Depends(get_db)):
     user = db.query(models.User).filter_by(tg_id=tg_id).one_or_none()
@@ -551,7 +515,7 @@ def game_current(tg_id: str = Query(...), db: Session = Depends(get_db)):
 
     team = db.get(models.Team, member.team_id)
 
-    # ✅ если финиш — сразу говорим об этом
+    # если финиш — сразу говорим об этом
     if getattr(team, "finished_at", None):
         return {"finished": True, "checkpoint": None}
 
@@ -573,6 +537,7 @@ def game_current(tg_id: str = Query(...), db: Session = Depends(get_db)):
             "total": total,
         },
     }
+
 
 # ---------- GAME: QR отключён (только фото) ----------
 @router.post("/game/scan", response_model=GameScanOut, dependencies=[Depends(require_secret)])
@@ -610,27 +575,35 @@ def submit_photo_json(
     if not cp:
         return {"ok": False, "message": "Route already finished"}
 
-    # Единственная запись на чекпоинт: переиспользуем, а не создаём ещё одну
-    existing = db.query(models.Proof).filter(
+    # Если уже есть PENDING — не спамим
+    pending_exists = db.query(models.Proof).filter(
         models.Proof.team_id == team.id,
         models.Proof.checkpoint_id == cp.id,
-    ).one_or_none()
+        models.Proof.status == "PENDING",
+    ).first()
+    if pending_exists:
+        return {"ok": True, "message": "Already queued for moderation", "proof_id": pending_exists.id}
 
-    if existing:
-        # Если уже зачтено — не даём перезаливать
-        if existing.status == "APPROVED":
-            return {"ok": False, "message": "Already approved"}
+    # Если последний по этой точке был REJECTED — переоткроем его
+    rejected = db.query(models.Proof).filter(
+        models.Proof.team_id == team.id,
+        models.Proof.checkpoint_id == cp.id,
+        models.Proof.status == "REJECTED",
+    ).order_by(models.Proof.id.desc()).first()
 
-        # Сбрасываем и ставим обратно в очередь с новым файлом
-        existing.photo_file_id = tg_file_id
-        existing.status = "PENDING"
-        existing.submitted_by_user_id = user.id
-        existing.judged_by = None
-        existing.judged_at = None
-        existing.comment = None
+    if rejected:
+        rejected.status = "PENDING"
+        rejected.photo_file_id = tg_file_id
+        rejected.submitted_by_user_id = user.id
+        rejected.judged_by = None
+        rejected.judged_at = None
+        rejected.comment = None
+        # гарантируем обновление updated_at
+        if hasattr(rejected, "updated_at"):
+            rejected.updated_at = now_utc()
         db.commit()
-        db.refresh(existing)
-        return {"ok": True, "message": "Requeued for moderation", "proof_id": existing.id}
+        db.refresh(rejected)
+        return {"ok": True, "message": "Re-queued for moderation", "proof_id": rejected.id}
 
     # Первичная подача для этого чекпоинта
     proof = models.Proof(
@@ -645,6 +618,7 @@ def submit_photo_json(
     db.commit()
     db.refresh(proof)
     return {"ok": True, "message": "Queued for moderation", "proof_id": proof.id}
+
 
 # ---------- Фото: multipart — сохраняем файл локально и тоже Proof ----------
 @router.post("/game/submit-photo", response_model=dict, dependencies=[Depends(require_secret)])
@@ -678,24 +652,36 @@ def submit_photo_file(
     with open(path, "wb") as out:
         out.write(file.file.read())
 
-    existing = db.query(models.Proof).filter(
+    # Если уже есть PENDING — не спамим
+    pending_exists = db.query(models.Proof).filter(
         models.Proof.team_id == team.id,
         models.Proof.checkpoint_id == cp.id,
-    ).one_or_none()
+        models.Proof.status == "PENDING",
+    ).first()
+    if pending_exists:
+        return {"ok": True, "message": "Already queued for moderation", "proof_id": pending_exists.id, "file": fname}
 
-    if existing:
-        if existing.status == "APPROVED":
-            return {"ok": False, "message": "Already approved"}
-        existing.photo_file_id = path           # локальный путь
-        existing.status = "PENDING"
-        existing.submitted_by_user_id = user.id
-        existing.judged_by = None
-        existing.judged_at = None
-        existing.comment = None
+    # Если был REJECTED — переоткроем
+    rejected = db.query(models.Proof).filter(
+        models.Proof.team_id == team.id,
+        models.Proof.checkpoint_id == cp.id,
+        models.Proof.status == "REJECTED",
+    ).order_by(models.Proof.id.desc()).first()
+
+    if rejected:
+        rejected.status = "PENDING"
+        rejected.photo_file_id = path
+        rejected.submitted_by_user_id = user.id
+        rejected.judged_by = None
+        rejected.judged_at = None
+        rejected.comment = None
+        if hasattr(rejected, "updated_at"):
+            rejected.updated_at = now_utc()
         db.commit()
-        db.refresh(existing)
-        return {"ok": True, "message": "Requeued for moderation", "proof_id": existing.id, "file": fname}
+        db.refresh(rejected)
+        return {"ok": True, "message": "Re-queued for moderation", "proof_id": rejected.id, "file": fname}
 
+    # Первичная подача
     proof = models.Proof(
         team_id=team.id,
         route_id=team.route_id,
@@ -708,6 +694,7 @@ def submit_photo_file(
     db.commit()
     db.refresh(proof)
     return {"ok": True, "message": "Queued for moderation", "proof_id": proof.id, "file": fname}
+
 
 # ---------- ЛИДЕРБОРД по маршруту ----------
 @router.get("/leaderboard", response_model=list, dependencies=[Depends(require_secret)])
@@ -761,7 +748,16 @@ def leaderboard(
     return rows
 
 
-# ---------- ADMIN ----------
+# =============================================================================
+# ADMIN (под /api/admin, защищён require_secret)
+# =============================================================================
+
+@admin.get("/teams/{team_id}", response_model=TeamAdminOut)
+def admin_get_team(team_id: int = Path(..., ge=1), db: Session = Depends(get_db)):
+    team = db.get(models.Team, team_id)
+    if not team:
+        raise HTTPException(404, "Team not found")
+    return dump_team_admin(db, team)
 
 
 @admin.get("/teams", response_model=List[TeamAdminOut])
@@ -971,16 +967,11 @@ def admin_pending(db: Session = Depends(get_db)):
             "checkpoint_title": cp.title,
             "photo_file_id": proof.photo_file_id,
             "submitted_by_user_id": getattr(proof, "submitted_by_user_id", None),
-            "submitted_by_tg_id": getattr(user, "tg_id", None),     # <-- добавили
+            "submitted_by_tg_id": getattr(user, "tg_id", None),
             "created_at": proof.created_at.isoformat() if getattr(proof, "created_at", None) else None,
+            "updated_at": getattr(proof, "updated_at", None).isoformat() if getattr(proof, "updated_at", None) else None,  # <-- важно для вотчера
         })
     return out
-
-
-def _progress_tuple(db: Session, team: models.Team) -> Dict[str, int]:
-    done = _approved_count_cp(db, team.id)
-    total = _route_total_checkpoints(db, getattr(team, "route_id", None))
-    return {"done": int(done), "total": int(total)}
 
 
 @admin.post("/proofs/{proof_id}/approve", response_model=dict)
@@ -994,6 +985,8 @@ def admin_approve(proof_id: int = Path(..., ge=1), db: Session = Depends(get_db)
     proof.status = "APPROVED"
     proof.judged_by = 0
     proof.judged_at = now_utc()
+    if hasattr(proof, "updated_at"):
+        proof.updated_at = now_utc()
     db.commit()
 
     team = db.get(models.Team, proof.team_id)
@@ -1001,12 +994,12 @@ def admin_approve(proof_id: int = Path(..., ge=1), db: Session = Depends(get_db)
     if _is_last_checkpoint(db, team):
         if not getattr(team, "finished_at", None):
             team.finished_at = now_utc()
-            # НЕ трогаем team.current_order_num — колонка NOT NULL
             db.commit()
     else:
         _advance_team_to_next_checkpoint(db, team)
 
     return {"ok": True, "progress": _progress_tuple(db, team)}
+
 
 @admin.post("/proofs/{proof_id}/reject", response_model=dict)
 def admin_reject(proof_id: int = Path(..., ge=1), db: Session = Depends(get_db)):
@@ -1019,6 +1012,8 @@ def admin_reject(proof_id: int = Path(..., ge=1), db: Session = Depends(get_db))
     proof.status = "REJECTED"
     proof.judged_by = 0
     proof.judged_at = now_utc()
+    if hasattr(proof, "updated_at"):
+        proof.updated_at = now_utc()
     db.commit()
     team = db.get(models.Team, proof.team_id)
     return {"ok": True, "progress": _progress_tuple(db, team)}
