@@ -152,7 +152,6 @@
           </p>
         </div>
 
-        <!-- NEW: Контакты координатора -->
         <div class="card" id="coord-card">
           <h3 class="title">Контакты координатора</h3>
           <div class="kv">
@@ -235,16 +234,36 @@
           })
         );
 
-        // Utils
-        const toNum = (v) => {
-          const n = Number(v);
-          return Number.isFinite(n) ? n : null;
-        };
-        function fmtTime(iso) {
-          if (!iso) return "—";
-          const d = new Date(iso);
-          return isNaN(d.getTime()) ? "—" : d.toLocaleString();
+        // ================== Utils ==================
+        const MOSCOW_TZ = "Europe/Moscow";
+        const hasTZ = (s) => /[zZ]|[+-]\d\d:?\d\d$/.test(s || "");
+
+        // Трактуем ISO без TZ как UTC (добиваем 'Z'), возвращаем Unix-секунды
+        function parseIsoToEpoch(iso) {
+          if (!iso) return null;
+          const s = hasTZ(iso) ? iso : iso + "Z";
+          const d = new Date(s);
+          return isNaN(d.getTime()) ? null : Math.floor(d.getTime() / 1000);
         }
+
+        // Форматируем время в московском часовом поясе
+        function fmtTimeMSK(iso) {
+          if (!iso) return "—";
+          const s = hasTZ(iso) ? iso : iso + "Z";
+          const d = new Date(s);
+          if (isNaN(d.getTime())) return "—";
+          try {
+            return new Intl.DateTimeFormat("ru-RU", {
+              dateStyle: "short",
+              timeStyle: "medium",
+              timeZone: MOSCOW_TZ,
+            }).format(d);
+          } catch {
+            return d.toLocaleString();
+          }
+        }
+
+        // Чистая длительность (часы:минуты:секунды)
         function fmtDur(sec) {
           if (sec == null) return "—";
           const s = Math.max(0, Math.floor(sec));
@@ -254,6 +273,7 @@
           return `${hh}:${mm}:${ss}`;
         }
 
+        // ================== API ==================
         async function fetchSummary() {
           const init_data = tg?.initData || "";
           const res = await fetch(
@@ -262,6 +282,7 @@
           if (!res.ok) throw new Error("summary failed");
           return await res.json();
         }
+
         async function fetchLeaderboard() {
           const res = await fetch("/api/webapp/leaderboard");
           if (!res.ok) throw new Error("leaderboard failed");
@@ -269,23 +290,29 @@
           return data.leaderboard || [];
         }
 
+        // ================== Renderers ==================
         function renderTeam(s) {
           const t = s.team || {};
-          let solved = toNum(t.solved);
-          let total = toNum(t.total);
+          let solved = Number.isFinite(+t.solved) ? +t.solved : null;
+          let total = Number.isFinite(+t.total) ? +t.total : null;
           if (solved === null || total === null) {
-            solved = solved ?? toNum(s?.score?.done);
-            total = total ?? toNum(s?.score?.total);
+            solved =
+              solved ??
+              (Number.isFinite(+s?.score?.done) ? +s?.score?.done : null);
+            total =
+              total ??
+              (Number.isFinite(+s?.score?.total) ? +s?.score?.total : null);
           }
+
           document.getElementById("team-name").children[0].innerText =
             t.team_name ?? "—";
           document.getElementById("team-solved").innerText = `${
             solved ?? "—"
           }/${total ?? "—"}`;
-          document.getElementById("team-started").innerText = fmtTime(
+          document.getElementById("team-started").innerText = fmtTimeMSK(
             t.started_at
           );
-          document.getElementById("team-finished").innerText = fmtTime(
+          document.getElementById("team-finished").innerText = fmtTimeMSK(
             t.finished_at
           );
 
@@ -300,7 +327,7 @@
             s.is_captain && !t.started_at
           );
 
-          // NEW: контакты
+          // Контакты координатора
           const ct = s?.coordinator?.tg || s?.coordinator?.contact || "";
           const cp = s?.coordinator?.phone || "";
           const tgA = document.getElementById("coord-tg");
@@ -376,29 +403,50 @@
         function renderBoard(rows) {
           const tbody = document.getElementById("tbl-board-body");
           tbody.innerHTML = "";
-          const now = Date.now() / 1000;
 
           rows.forEach((r, idx) => {
             const tr = document.createElement("tr");
             const rank = document.createElement("td");
             rank.textContent = String(idx + 1);
+
             const name = document.createElement("td");
             name.textContent = r.team_name ?? "—";
+
             const solved = document.createElement("td");
-            solved.textContent = `${
-              toNum(r.tasks_done) ?? toNum(r.solved) ?? 0
-            }/${toNum(r.total_tasks) ?? toNum(r.total) ?? 0}`;
+            const done = Number.isFinite(+r.tasks_done)
+              ? +r.tasks_done
+              : Number.isFinite(+r.solved)
+              ? +r.solved
+              : 0;
+            const total = Number.isFinite(+r.total_tasks)
+              ? +r.total_tasks
+              : Number.isFinite(+r.total)
+              ? +r.total
+              : 0;
+            solved.textContent = `${done}/${total}`;
+
             const time = document.createElement("td");
 
             if (r.finished_at) {
-              time.textContent = fmtDur(r.elapsed_seconds ?? r.duration_sec);
+              // Если бек не дал elapsed_seconds — посчитаем сами
+              let elapsed = Number.isFinite(+r.elapsed_seconds)
+                ? +r.elapsed_seconds
+                : null;
+              if (elapsed == null) {
+                const t0 = parseIsoToEpoch(r.started_at);
+                const t1 = parseIsoToEpoch(r.finished_at);
+                elapsed = t0 != null && t1 != null && t1 >= t0 ? t1 - t0 : null;
+              }
+              time.textContent = fmtDur(elapsed);
             } else if (r.started_at) {
-              const startSec = Math.floor(
-                new Date(r.started_at).getTime() / 1000
-              );
-              const base = now - startSec;
-              time.dataset.t0 = String(startSec);
-              time.textContent = fmtDur(base);
+              const startSec = parseIsoToEpoch(r.started_at);
+              if (startSec == null) {
+                time.textContent = "—";
+              } else {
+                const base = Math.floor(Date.now() / 1000) - startSec;
+                time.dataset.t0 = String(startSec);
+                time.textContent = fmtDur(base);
+              }
             } else {
               time.textContent = "—";
             }
@@ -419,6 +467,7 @@
           }, 1000);
         }
 
+        // ================== Flow ==================
         async function refresh() {
           try {
             const s = await fetchSummary();
