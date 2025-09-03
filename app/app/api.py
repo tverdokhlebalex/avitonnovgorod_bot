@@ -751,7 +751,29 @@ def leaderboard(
 # =============================================================================
 # ADMIN (под /api/admin, защищён require_secret)
 # =============================================================================
-
+@admin.get("/teams/search", response_model=list[dict])
+def admin_search_teams(
+    q: str = Query(..., min_length=1, description="Substring search (case-insensitive)"),
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    # Postgres: ILIKE / SQLite: LOWER(name) LIKE LOWER(:q)
+    # Если у тебя Postgres — оставь .ilike; для SQLite замени на func.lower(...)
+    rows = (
+        db.query(models.Team.id, models.Team.name, models.Team.started_at)
+        .filter(models.Team.name.ilike(f"%{q}%"))  # для SQLite: func.lower(models.Team.name).like(func.lower(f"%{q}%"))
+        .order_by(models.Team.name.asc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "team_id": r.id,
+            "team_name": r.name,
+            "started_at": r.started_at.isoformat() if r.started_at else None,
+        }
+        for r in rows
+    ]
 @admin.get("/teams/{team_id}", response_model=TeamAdminOut)
 def admin_get_team(team_id: int = Path(..., ge=1), db: Session = Depends(get_db)):
     team = db.get(models.Team, team_id)
@@ -794,6 +816,10 @@ def admin_set_captain(
     if not data.user_id and not data.tg_id:
         raise HTTPException(400, "Provide user_id or tg_id")
 
+    team = db.get(models.Team, team_id)
+    if not team:
+        raise HTTPException(404, "Team not found")
+
     q = db.query(models.User)
     q = q.filter(models.User.id == data.user_id) if data.user_id else q.filter(models.User.tg_id == str(data.tg_id))
     user = q.one_or_none()
@@ -808,15 +834,14 @@ def admin_set_captain(
     if not member:
         raise HTTPException(409, "User is not a member of this team")
 
+    # снять прежнего капитана → назначить нового
     db.query(models.TeamMember).filter(
         models.TeamMember.team_id == team_id, models.TeamMember.role == "CAPTAIN"
     ).update({models.TeamMember.role: "PLAYER"})
     member.role = "CAPTAIN"
     db.commit()
 
-    team = db.get(models.Team, team_id)
     return dump_team_admin(db, team)
-
 
 @admin.post("/teams/{team_id}/unset-captain", response_model=TeamAdminOut)
 def admin_unset_captain(team_id: int = Path(..., ge=1), db: Session = Depends(get_db)):

@@ -21,7 +21,9 @@ PARTICIPANTS_CSV = os.getenv("PARTICIPANTS_CSV", "/code/data/participants.csv")
 PARTICIPANTS_CSV_FALLBACK = "/code/data/participants_template.csv"
 
 CLIENT_TIMEOUT = aiohttp.ClientTimeout(total=20, connect=5, sock_connect=5, sock_read=15)
-
+ADMIN_USER_IDS = {
+    int(x) for x in os.getenv("ADMIN_USER_IDS", "").replace(" ", "").split(",") if x
+}
 # WebApp
 WEBAPP_URL = (os.getenv("WEBAPP_URL") or f"{API_BASE}/webapp").strip()
 def build_webapp_url(tg_id: int | str) -> str:

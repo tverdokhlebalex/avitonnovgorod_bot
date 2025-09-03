@@ -111,6 +111,9 @@ async def current_checkpoint(tg_id: int | str):
     """
     return await _req_json("GET", "/api/game/current", params={"tg_id": str(tg_id)})
 
+# поиск команд по подстроке
+async def admin_search_teams(q: str, limit: int = 20):
+    return await _req_json("GET", "/api/admin/teams/search", params={"q": q, "limit": str(limit)})
 
 # совместимость со старым импортом
 async def game_current(tg_id: int | str):

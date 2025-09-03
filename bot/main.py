@@ -5,7 +5,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from .config import BOT_TOKEN, get_http, HTTP
-from .handlers import registration, captain, common, admin as admin_handlers
+from .handlers import registration, captain, common, admin as admin_handlers, admin_captains 
 from .admin_watcher import AdminWatcher
 
 
@@ -30,6 +30,7 @@ async def main():
         captain.router,
         common.router,
         admin_handlers.router,
+        admin_captains.router,
     )
 
     # Открываем общую HTTP-сессию для api_client
