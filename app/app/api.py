@@ -610,15 +610,29 @@ def submit_photo_json(
     if not cp:
         return {"ok": False, "message": "Route already finished"}
 
-    # Если уже есть PENDING по текущей точке — не спамим
-    pending_exists = db.query(models.Proof).filter(
+    # Единственная запись на чекпоинт: переиспользуем, а не создаём ещё одну
+    existing = db.query(models.Proof).filter(
         models.Proof.team_id == team.id,
         models.Proof.checkpoint_id == cp.id,
-        models.Proof.status == "PENDING",
-    ).first()
-    if pending_exists:
-        return {"ok": True, "message": "Already queued for moderation", "proof_id": pending_exists.id}
+    ).one_or_none()
 
+    if existing:
+        # Если уже зачтено — не даём перезаливать
+        if existing.status == "APPROVED":
+            return {"ok": False, "message": "Already approved"}
+
+        # Сбрасываем и ставим обратно в очередь с новым файлом
+        existing.photo_file_id = tg_file_id
+        existing.status = "PENDING"
+        existing.submitted_by_user_id = user.id
+        existing.judged_by = None
+        existing.judged_at = None
+        existing.comment = None
+        db.commit()
+        db.refresh(existing)
+        return {"ok": True, "message": "Requeued for moderation", "proof_id": existing.id}
+
+    # Первичная подача для этого чекпоинта
     proof = models.Proof(
         team_id=team.id,
         route_id=team.route_id,
@@ -630,9 +644,7 @@ def submit_photo_json(
     db.add(proof)
     db.commit()
     db.refresh(proof)
-
     return {"ok": True, "message": "Queued for moderation", "proof_id": proof.id}
-
 
 # ---------- Фото: multipart — сохраняем файл локально и тоже Proof ----------
 @router.post("/game/submit-photo", response_model=dict, dependencies=[Depends(require_secret)])
@@ -666,20 +678,36 @@ def submit_photo_file(
     with open(path, "wb") as out:
         out.write(file.file.read())
 
+    existing = db.query(models.Proof).filter(
+        models.Proof.team_id == team.id,
+        models.Proof.checkpoint_id == cp.id,
+    ).one_or_none()
+
+    if existing:
+        if existing.status == "APPROVED":
+            return {"ok": False, "message": "Already approved"}
+        existing.photo_file_id = path           # локальный путь
+        existing.status = "PENDING"
+        existing.submitted_by_user_id = user.id
+        existing.judged_by = None
+        existing.judged_at = None
+        existing.comment = None
+        db.commit()
+        db.refresh(existing)
+        return {"ok": True, "message": "Requeued for moderation", "proof_id": existing.id, "file": fname}
+
     proof = models.Proof(
         team_id=team.id,
         route_id=team.route_id,
         checkpoint_id=cp.id,
-        photo_file_id=path,               # локальный путь
+        photo_file_id=path,                     # локальный путь
         status="PENDING",
         submitted_by_user_id=user.id,
     )
     db.add(proof)
     db.commit()
     db.refresh(proof)
-
     return {"ok": True, "message": "Queued for moderation", "proof_id": proof.id, "file": fname}
-
 
 # ---------- ЛИДЕРБОРД по маршруту ----------
 @router.get("/leaderboard", response_model=list, dependencies=[Depends(require_secret)])
@@ -922,16 +950,17 @@ def admin_tasks_reset_progress(db: Session = Depends(get_db)):
 @admin.get("/proofs/pending", response_model=list)
 def admin_pending(db: Session = Depends(get_db)):
     q = (
-        db.query(models.Proof, models.Team, models.Checkpoint, models.Route)
+        db.query(models.Proof, models.Team, models.Checkpoint, models.Route, models.User)
         .join(models.Team, models.Team.id == models.Proof.team_id)
         .join(models.Checkpoint, models.Checkpoint.id == models.Proof.checkpoint_id)
         .join(models.Route, models.Route.id == models.Proof.route_id)
+        .join(models.User, models.User.id == models.Proof.submitted_by_user_id, isouter=True)
         .filter(models.Proof.status == "PENDING")
         .order_by(models.Proof.created_at.asc())
         .all()
     )
     out = []
-    for proof, team, cp, route in q:
+    for proof, team, cp, route, user in q:
         out.append({
             "id": proof.id,
             "team_id": team.id,
@@ -942,6 +971,7 @@ def admin_pending(db: Session = Depends(get_db)):
             "checkpoint_title": cp.title,
             "photo_file_id": proof.photo_file_id,
             "submitted_by_user_id": getattr(proof, "submitted_by_user_id", None),
+            "submitted_by_tg_id": getattr(user, "tg_id", None),     # <-- добавили
             "created_at": proof.created_at.isoformat() if getattr(proof, "created_at", None) else None,
         })
     return out
