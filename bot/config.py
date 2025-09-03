@@ -6,6 +6,12 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 if not BOT_TOKEN or not re.match(r"^\d+:[\w-]+$", BOT_TOKEN):
     raise SystemExit("BOT_TOKEN отсутствует или некорректен")
 
+
+ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(";",",").split(",") if x.strip().isdigit()}
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0") or 0)
+ADMIN_POLL_SECONDS = int(os.getenv("ADMIN_POLL_SECONDS", "5"))
+PROOFS_DIR = os.getenv("PROOFS_DIR", "/code/data/proofs")
+
 API_BASE = (os.getenv("API_BASE") or os.getenv("API_URL", "http://app:8000")).rstrip("/")
 APP_SECRET = os.getenv("APP_SECRET", "change-me-please")
 TEAM_SIZE = int(os.getenv("TEAM_SIZE", "7"))

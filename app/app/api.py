@@ -36,12 +36,13 @@ TEAM_SIZE = int(os.getenv("TEAM_SIZE", 7))
 PROOFS_DIR = os.getenv("PROOFS_DIR", "/code/data/proofs")
 os.makedirs(PROOFS_DIR, exist_ok=True)
 
-
 # --- security ---
 def require_secret(x_app_secret: str | None = Header(default=None, alias="x-app-secret")):
     if not x_app_secret or x_app_secret != APP_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
+# !!! объявляем admin-подроутер ТОЛЬКО после require_secret
+admin = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_secret)])
 
 # --- helpers ---
 def now_utc() -> datetime:
@@ -241,8 +242,54 @@ def _advance_team_to_next_checkpoint(db: Session, team: models.Team) -> None:
 
 # =============================================================================
 #                         PUBLIC (requires x-app-secret)
-# =============================================================================
 
+@admin.get("/teams/{team_id}", response_model=TeamAdminOut)
+def admin_get_team(team_id: int = Path(..., ge=1), db: Session = Depends(get_db)):
+    team = db.get(models.Team, team_id)
+    if not team:
+        raise HTTPException(404, "Team not found")
+    return dump_team_admin(db, team)
+
+@admin.get("/proofs/pending", response_model=list)
+def admin_pending(db: Session = Depends(get_db)):
+    q = (
+        db.query(models.Proof, models.Team, models.Checkpoint, models.Route)
+        .join(models.Team, models.Team.id == models.Proof.team_id)
+        .join(models.Checkpoint, models.Checkpoint.id == models.Proof.checkpoint_id)
+        .join(models.Route, models.Route.id == models.Proof.route_id)
+        .filter(models.Proof.status == "PENDING")
+        .order_by(models.Proof.created_at.asc())
+        .all()
+    )
+    out = []
+    for proof, team, cp, route in q:
+        cap_row = (
+            db.query(models.TeamMember, models.User)
+            .join(models.User, models.User.id == models.TeamMember.user_id)
+            .filter(models.TeamMember.team_id == team.id, models.TeamMember.role == "CAPTAIN")
+            .one_or_none()
+        )
+        cap_tg = cap_name = None
+        if cap_row:
+            _, u = cap_row
+            cap_tg   = getattr(u, "tg_id", None)
+            cap_name = getattr(u, "first_name", None)
+
+        out.append({
+            "id": proof.id,
+            "team_id": team.id,
+            "team_name": team.name,
+            "route": route.code,
+            "checkpoint_id": cp.id,
+            "order_num": cp.order_num,
+            "checkpoint_title": cp.title,
+            "photo_file_id": proof.photo_file_id,
+            "captain_tg_id": cap_tg,
+            "captain_name": cap_name,
+            "submitted_by_user_id": getattr(proof, "submitted_by_user_id", None),
+            "created_at": proof.created_at.isoformat() if getattr(proof, "created_at", None) else None,
+        })
+    return out
 @router.post("/users/register", response_model=RegisterOut, dependencies=[Depends(require_secret)])
 def register_or_assign(payload: RegisterIn, db: Session = Depends(get_db)):
     phone = norm_phone(payload.phone)
@@ -687,7 +734,6 @@ def leaderboard(
 
 
 # ---------- ADMIN ----------
-admin = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_secret)])
 
 
 @admin.get("/teams", response_model=List[TeamAdminOut])
